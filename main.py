@@ -67,7 +67,7 @@ async def get_open_jira_tickets():
     logging.debug(f"Using JQL Query: {jql_query}")
     query = {
         "jql": jql_query,
-        "fields": "summary,duedate,priority,status,issuetype"
+        "fields": "summary,duedate,priority,status,issuetype,description"  # Include description field
     }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=query) as response:
@@ -85,7 +85,8 @@ async def get_open_jira_tickets():
             "due_date": issue["fields"].get("duedate"),
             "priority": issue["fields"].get("priority", {}).get("name"),
             "status": issue["fields"].get("status", {}).get("name"),
-            "issuetype": issue["fields"].get("issuetype", {}).get("name")
+            "issuetype": issue["fields"].get("issuetype", {}).get("name"),
+            "description": issue["fields"].get("description")  # Fetch description
         }
         for issue in issues
     ]
@@ -132,7 +133,8 @@ async def sync_to_todoist(jira_tickets):
         task_content = f"{ticket['key']}: {ticket['summary']}"
         task_due_date = ticket["due_date"]
         task_priority = 4
-        task_description = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
+        jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
+        task_description = f"{jira_link}\n\n{ticket['description']}"  # Add link at the top, followed by description
 
         if ticket["priority"]:
             priority_mapping = {
@@ -151,7 +153,7 @@ async def sync_to_todoist(jira_tickets):
                 "content": task_content,
                 "due_date": task_due_date,
                 "priority": task_priority,
-                "description": task_description
+                "description": task_description  # Update description with link and Jira description
             })
         else:
             tasks_to_add.append({
@@ -159,7 +161,7 @@ async def sync_to_todoist(jira_tickets):
                 "project_id": jira_project.id,
                 "due_date": task_due_date,
                 "priority": task_priority,
-                "description": task_description
+                "description": task_description  # Add description with link and Jira description
             })
     for task_key, task in existing_task_map.items():
         if task_key in blocked_or_cancelled_ticket_keys:
