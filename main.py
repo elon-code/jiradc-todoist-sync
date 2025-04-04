@@ -27,18 +27,18 @@ def get_current_jira_user():
 JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
 
 def get_open_jira_tickets():
-    """Fetch open Jira tickets assigned to the user."""
+    """Fetch open Jira tickets assigned to the user, excluding blocked tickets."""
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
     headers = {
         "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    # Use JIRA_USERNAME directly without URL-encoding
-    jql_query = f'assignee = "{JIRA_USERNAME}" AND status != Done'  # Enclose in double quotes
+    # Exclude blocked tickets in the JQL query
+    jql_query = f'assignee = "{JIRA_USERNAME}" AND status != Done AND status != Blocked'
     print(f"Using JQL Query: {jql_query}")  # Debugging: Print the JQL query
     query = {
         "jql": jql_query,
-        "fields": "summary,duedate,priority"  # Include due date and priority fields
+        "fields": "summary,duedate,priority,status"  # Include status field
     }
     response = requests.get(url, headers=headers, params=query)
     if response.status_code != 200:
@@ -52,7 +52,8 @@ def get_open_jira_tickets():
             "key": issue["key"],
             "summary": issue["fields"]["summary"],
             "due_date": issue["fields"].get("duedate"),  # Fetch due date
-            "priority": issue["fields"].get("priority", {}).get("name")  # Fetch priority name
+            "priority": issue["fields"].get("priority", {}).get("name"),  # Fetch priority name
+            "status": issue["fields"].get("status", {}).get("name")  # Fetch status name
         }
         for issue in issues
     ]
@@ -83,11 +84,19 @@ async def sync_to_todoist(jira_tickets):
         print(f"Failed to retrieve existing tasks: {e}")
         return
 
-    # Prepare batch updates
+    # Prepare batch updates, additions, completions, and deletions
     tasks_to_update = []
     tasks_to_add = []
+    tasks_to_complete = []
+    tasks_to_delete = []
+
+    jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
+    blocked_ticket_keys = {ticket["key"] for ticket in jira_tickets if ticket["status"] == "Blocked"}
 
     for ticket in jira_tickets:
+        if ticket["status"] == "Blocked":
+            continue  # Skip blocked tickets
+
         task_content = f"{ticket['key']}: {ticket['summary']}"
         task_due_date = ticket["due_date"]  # Use the due date from Jira
         task_priority = 4  # Default priority (Todoist uses 1-4, with 4 being the lowest)
@@ -124,12 +133,25 @@ async def sync_to_todoist(jira_tickets):
                 "description": task_description
             })
 
+    # Identify tasks to mark as done or delete
+    for task_key, task in existing_task_map.items():
+        if task_key not in jira_ticket_keys:
+            tasks_to_complete.append(task.id)
+        elif task_key in blocked_ticket_keys:
+            tasks_to_delete.append(task.id)
+
     # Perform batch updates asynchronously
     update_tasks = [
         api.update_task(**task) for task in tasks_to_update
     ]
     add_tasks = [
         api.add_task(**task) for task in tasks_to_add
+    ]
+    complete_tasks = [
+        api.close_task(task_id=task_id) for task_id in tasks_to_complete
+    ]
+    delete_tasks = [
+        api.delete_task(task_id=task_id) for task_id in tasks_to_delete
     ]
 
     try:
@@ -143,6 +165,18 @@ async def sync_to_todoist(jira_tickets):
         print(f"Added {len(add_tasks)} tasks.")
     except Exception as e:
         print(f"Failed to add some tasks: {e}")
+
+    try:
+        await asyncio.gather(*complete_tasks)
+        print(f"Marked {len(complete_tasks)} tasks as done.")
+    except Exception as e:
+        print(f"Failed to mark some tasks as done: {e}")
+
+    try:
+        await asyncio.gather(*delete_tasks)
+        print(f"Deleted {len(delete_tasks)} blocked tasks.")
+    except Exception as e:
+        print(f"Failed to delete some blocked tasks: {e}")
 
 if __name__ == "__main__":
     print(f"JIRA_USERNAME: {JIRA_USERNAME}")  # Debugging: Print the username being used
