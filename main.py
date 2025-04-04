@@ -1,4 +1,5 @@
 import requests
+import aiohttp
 import json
 import urllib.parse
 import asyncio
@@ -27,26 +28,27 @@ def get_current_jira_user():
 # Update JIRA_USERNAME to fetch dynamically if not provided in config
 JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
 
-def get_green_resolution_statuses():
-    """Fetch all Jira statuses and identify green resolution statuses."""
+async def get_green_resolution_statuses():
+    """Fetch all Jira statuses and identify green resolution statuses asynchronously."""
     url = f"{JIRA_SERVER_URL}/rest/api/2/status"
     headers = {
         "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f"Error fetching Jira statuses: {response.status_code} - {response.text}")
-        response.raise_for_status()
-    statuses = response.json()
-    # Identify green resolution statuses (e.g., "Done", "Resolved")
-    green_statuses = [status["name"] for status in statuses if status.get("statusCategory", {}).get("key") == "done"]
-    print(f"Green resolution statuses: {green_statuses}")
-    return green_statuses
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                print(f"Error fetching Jira statuses: {response.status} - {await response.text()}")
+                response.raise_for_status()
+            statuses = await response.json()
+            # Identify green resolution statuses (e.g., "Done", "Resolved")
+            green_statuses = [status["name"] for status in statuses if status.get("statusCategory", {}).get("key") == "done"]
+            print(f"Green resolution statuses: {green_statuses}")
+            return green_statuses
 
-def get_open_jira_tickets():
+async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
-    green_statuses = get_green_resolution_statuses()
+    green_statuses = await get_green_resolution_statuses()
     excluded_statuses = ["Blocked", "Cancelled"] + green_statuses
     excluded_statuses_jql = ", ".join(f'"{status}"' for status in excluded_statuses)
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
@@ -106,6 +108,9 @@ async def sync_to_todoist(jira_tickets):
         print(f"Failed to retrieve existing tasks: {e}")
         return
 
+    # Get green resolution statuses asynchronously
+    green_resolution_statuses = await get_green_resolution_statuses()  # Add await here
+
     # Prepare batch updates, additions, completions, and deletions
     tasks_to_update = []
     tasks_to_add = []
@@ -113,7 +118,6 @@ async def sync_to_todoist(jira_tickets):
     tasks_to_delete = []
 
     jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
-    green_resolution_statuses = get_green_resolution_statuses()
     blocked_or_cancelled_ticket_keys = {
         ticket["key"] for ticket in jira_tickets if ticket["status"] in {"Blocked", "Cancelled"}
     }
@@ -161,10 +165,10 @@ async def sync_to_todoist(jira_tickets):
                 "priority": task_priority,
                 "description": task_description
             })
-
-    # Identify tasks to mark as done or delete
     for task_key, task in existing_task_map.items():
-        if task_key not in jira_ticket_keys:
+        if task_key in blocked_or_cancelled_ticket_keys:
+            tasks_to_delete.append(task.id)  # Delete blocked or cancelled tasks
+        elif task_key not in jira_ticket_keys:
             tasks_to_complete.append(task.id)  # Mark tasks as done for green resolution statuses
         elif task_key in blocked_or_cancelled_ticket_keys:
             tasks_to_delete.append(task.id)
@@ -212,7 +216,7 @@ async def run_service():
     while True:
         print("Starting Jira to Todoist sync...")
         try:
-            jira_tickets = get_open_jira_tickets()
+            jira_tickets = await get_open_jira_tickets()  # Call the async function directly
             print("Jira Tickets:")
             for ticket in jira_tickets:
                 print(f"- {ticket['key']}: {ticket['summary']} (Due: {ticket['due_date']}, Priority: {ticket['priority']})")
