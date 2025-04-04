@@ -2,6 +2,7 @@ import requests
 import json
 import urllib.parse
 import asyncio
+import time
 from todoist_api_python.api_async import TodoistAPIAsync  # Use the async version of the API
 
 # Load configuration from config.json
@@ -26,19 +27,39 @@ def get_current_jira_user():
 # Update JIRA_USERNAME to fetch dynamically if not provided in config
 JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
 
+def get_green_resolution_statuses():
+    """Fetch all Jira statuses and identify green resolution statuses."""
+    url = f"{JIRA_SERVER_URL}/rest/api/2/status"
+    headers = {
+        "Authorization": f"Bearer {JIRA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        print(f"Error fetching Jira statuses: {response.status_code} - {response.text}")
+        response.raise_for_status()
+    statuses = response.json()
+    # Identify green resolution statuses (e.g., "Done", "Resolved")
+    green_statuses = [status["name"] for status in statuses if status.get("statusCategory", {}).get("key") == "done"]
+    print(f"Green resolution statuses: {green_statuses}")
+    return green_statuses
+
 def get_open_jira_tickets():
-    """Fetch open Jira tickets assigned to the user, excluding blocked tickets."""
+    """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
+    green_statuses = get_green_resolution_statuses()
+    excluded_statuses = ["Blocked", "Cancelled"] + green_statuses
+    excluded_statuses_jql = ", ".join(f'"{status}"' for status in excluded_statuses)
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
     headers = {
         "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    # Exclude blocked tickets in the JQL query
-    jql_query = f'assignee = "{JIRA_USERNAME}" AND status != Done AND status != Blocked'
+    # Exclude blocked, cancelled, and green resolution tickets in the JQL query
+    jql_query = f'assignee = "{JIRA_USERNAME}" AND status NOT IN ({excluded_statuses_jql})'
     print(f"Using JQL Query: {jql_query}")  # Debugging: Print the JQL query
     query = {
         "jql": jql_query,
-        "fields": "summary,duedate,priority,status"  # Include status field
+        "fields": "summary,duedate,priority,status,issuetype"  # Include issuetype field for Jira Service Management
     }
     response = requests.get(url, headers=headers, params=query)
     if response.status_code != 200:
@@ -53,7 +74,8 @@ def get_open_jira_tickets():
             "summary": issue["fields"]["summary"],
             "due_date": issue["fields"].get("duedate"),  # Fetch due date
             "priority": issue["fields"].get("priority", {}).get("name"),  # Fetch priority name
-            "status": issue["fields"].get("status", {}).get("name")  # Fetch status name
+            "status": issue["fields"].get("status", {}).get("name"),  # Fetch status name
+            "issuetype": issue["fields"].get("issuetype", {}).get("name")  # Fetch issue type
         }
         for issue in issues
     ]
@@ -91,11 +113,18 @@ async def sync_to_todoist(jira_tickets):
     tasks_to_delete = []
 
     jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
-    blocked_ticket_keys = {ticket["key"] for ticket in jira_tickets if ticket["status"] == "Blocked"}
+    green_resolution_statuses = get_green_resolution_statuses()
+    blocked_or_cancelled_ticket_keys = {
+        ticket["key"] for ticket in jira_tickets if ticket["status"] in {"Blocked", "Cancelled"}
+    }
 
     for ticket in jira_tickets:
-        if ticket["status"] == "Blocked":
-            continue  # Skip blocked tickets
+        if ticket["status"] in {"Blocked", "Cancelled"}:
+            continue  # Skip blocked or cancelled tickets
+
+        # Handle Jira Service Management tasks differently if needed
+        if ticket["issuetype"] == "Service Request":
+            print(f"Handling Jira Service Management task: {ticket['key']}")
 
         task_content = f"{ticket['key']}: {ticket['summary']}"
         task_due_date = ticket["due_date"]  # Use the due date from Jira
@@ -136,8 +165,8 @@ async def sync_to_todoist(jira_tickets):
     # Identify tasks to mark as done or delete
     for task_key, task in existing_task_map.items():
         if task_key not in jira_ticket_keys:
-            tasks_to_complete.append(task.id)
-        elif task_key in blocked_ticket_keys:
+            tasks_to_complete.append(task.id)  # Mark tasks as done for green resolution statuses
+        elif task_key in blocked_or_cancelled_ticket_keys:
             tasks_to_delete.append(task.id)
 
     # Perform batch updates asynchronously
@@ -178,14 +207,20 @@ async def sync_to_todoist(jira_tickets):
     except Exception as e:
         print(f"Failed to delete some blocked tasks: {e}")
 
+async def run_service():
+    """Run the sync process as a service, checking every 5 minutes."""
+    while True:
+        print("Starting Jira to Todoist sync...")
+        try:
+            jira_tickets = get_open_jira_tickets()
+            print("Jira Tickets:")
+            for ticket in jira_tickets:
+                print(f"- {ticket['key']}: {ticket['summary']} (Due: {ticket['due_date']}, Priority: {ticket['priority']})")
+            await sync_to_todoist(jira_tickets)
+        except Exception as e:
+            print(f"Error during sync: {e}")
+        print("Sync complete. Waiting for 5 minutes...")
+        await asyncio.sleep(300)  # Non-blocking wait for 5 minutes
+
 if __name__ == "__main__":
-    print(f"JIRA_USERNAME: {JIRA_USERNAME}")  # Debugging: Print the username being used
-    jira_tickets = get_open_jira_tickets()
-    
-    # Print tickets to confirm they are being read correctly
-    print("Jira Tickets:")
-    for ticket in jira_tickets:
-        print(f"- {ticket['key']}: {ticket['summary']} (Due: {ticket['due_date']}, Priority: {ticket['priority']})")
-    
-    # Run the sync process asynchronously
-    asyncio.run(sync_to_todoist(jira_tickets))
+    asyncio.run(run_service())
