@@ -63,11 +63,13 @@ async def get_open_jira_tickets():
         "jql": jql_query,
         "fields": "summary,duedate,priority,status,issuetype"  # Include issuetype field for Jira Service Management
     }
-    response = requests.get(url, headers=headers, params=query)
-    if response.status_code != 200:
-        print(f"Error fetching Jira tickets: {response.status_code} - {response.text}")
-    response.raise_for_status()
-    issues = response.json().get("issues", [])
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=query) as response:
+            if response.status != 200:
+                print(f"Error fetching Jira tickets: {response.status} - {await response.text()}")
+                response.raise_for_status()
+            response_json = await response.json()
+            issues = response_json.get("issues", [])
     if not issues:
         print("No tickets found. Full response:", response.json())  # Debugging: Print full response
     return [
@@ -168,8 +170,6 @@ async def sync_to_todoist(jira_tickets):
     for task_key, task in existing_task_map.items():
         if task_key in blocked_or_cancelled_ticket_keys:
             tasks_to_delete.append(task.id)  # Delete blocked or cancelled tasks
-        elif task_key not in jira_ticket_keys:
-            tasks_to_complete.append(task.id)  # Mark tasks as done for green resolution statuses
         elif task_key in blocked_or_cancelled_ticket_keys:
             tasks_to_delete.append(task.id)
 
