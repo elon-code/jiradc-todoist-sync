@@ -108,7 +108,7 @@ async def sync_to_todoist(jira_tickets):
 
     try:
         existing_tasks = await api.get_tasks(project_id=jira_project.id)
-        existing_task_map = {task.content.split(":")[0]: task for task in existing_tasks}
+        existing_task_map = {task.id: task for task in existing_tasks}
     except Exception as e:
         logging.error(f"Failed to retrieve existing tasks: {e}")
         return
