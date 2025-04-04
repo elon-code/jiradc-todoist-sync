@@ -87,7 +87,8 @@ def sync_to_todoist(jira_tickets):
         task_content = f"{ticket['key']}: {ticket['summary']}"
         task_due_date = ticket["due_date"]  # Use the due date from Jira
         task_priority = 4  # Default priority (Todoist uses 1-4, with 4 being the lowest)
-        
+        task_description = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"  # Add Jira ticket link
+
         # Map Jira priority to Todoist priority
         if ticket["priority"]:
             print(f"Jira Priority for {ticket['key']}: {ticket['priority']}")  # Debugging: Print Jira priority
@@ -108,7 +109,8 @@ def sync_to_todoist(jira_tickets):
                     task_id=existing_task.id,
                     content=task_content,
                     due_date=task_due_date,  # Update due date
-                    priority=task_priority  # Update priority
+                    priority=task_priority,  # Update priority
+                    description=task_description  # Update description with Jira link
                 )
                 print(f"Updated task: {task_content} (Due: {task_due_date}, Priority: {task_priority})")
             except Exception as e:
@@ -120,7 +122,8 @@ def sync_to_todoist(jira_tickets):
                     content=task_content,
                     project_id=jira_project.id,
                     due_date=task_due_date,  # Add due date
-                    priority=task_priority  # Add priority
+                    priority=task_priority,  # Add priority
+                    description=task_description  # Add description with Jira link
                 )
                 print(f"Added task: {task_content} (Due: {task_due_date}, Priority: {task_priority})")
             except Exception as e:
