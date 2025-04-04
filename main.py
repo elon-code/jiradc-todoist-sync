@@ -71,7 +71,7 @@ async def get_open_jira_tickets():
             response_json = await response.json()
             issues = response_json.get("issues", [])
     if not issues:
-        print("No tickets found. Full response:", response.json())  # Debugging: Print full response
+        print("No tickets found. Full response:", response_json)  # Debugging: Print full response
     return [
         {
             "key": issue["key"],
@@ -116,7 +116,6 @@ async def sync_to_todoist(jira_tickets):
     # Prepare batch updates, additions, completions, and deletions
     tasks_to_update = []
     tasks_to_add = []
-    tasks_to_complete = []
     tasks_to_delete = []
 
     jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
@@ -170,8 +169,6 @@ async def sync_to_todoist(jira_tickets):
     for task_key, task in existing_task_map.items():
         if task_key in blocked_or_cancelled_ticket_keys:
             tasks_to_delete.append(task.id)  # Delete blocked or cancelled tasks
-        elif task_key in blocked_or_cancelled_ticket_keys:
-            tasks_to_delete.append(task.id)
 
     # Perform batch updates asynchronously
     update_tasks = [
@@ -182,9 +179,6 @@ async def sync_to_todoist(jira_tickets):
     ]
     complete_tasks = [
         api.close_task(task_id=task_id) for task_id in tasks_to_complete
-    ]
-    delete_tasks = [
-        api.delete_task(task_id=task_id) for task_id in tasks_to_delete
     ]
 
     try:
@@ -201,11 +195,6 @@ async def sync_to_todoist(jira_tickets):
 
     try:
         await asyncio.gather(*complete_tasks)
-        print(f"Marked {len(complete_tasks)} tasks as done.")
-    except Exception as e:
-        print(f"Failed to mark some tasks as done: {e}")
-
-    try:
         await asyncio.gather(*delete_tasks)
         print(f"Deleted {len(delete_tasks)} blocked tasks.")
     except Exception as e:
