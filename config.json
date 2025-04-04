@@ -1,0 +1,5 @@
+{
+  "server_url": "INSERT_SERVER_URL_HERE",
+  "api_token": "INSERT_JIRA_API_TOKEN_HERE",
+  "todoist_api_token": "INSERT_TODOIST_API_TOKEN_HERE",
+}
