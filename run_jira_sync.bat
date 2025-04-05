@@ -1,3 +1,4 @@
 @echo off
 cd %~dp0
-python main.py
+git checkout main
+python main.py > run_jira_sync.log 2>&1
