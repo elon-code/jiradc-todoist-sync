@@ -139,7 +139,7 @@ async def sync_to_todoist(jira_tickets):
         task_due_date = ticket["due_date"]
         task_priority = 4
         jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
-        task_description = f"{jira_link}\n\n{ticket.get('description', '')}"  # Add link at the top, followed by description
+        task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Ensure no 'None' in description
 
         if ticket["priority"]:
             priority_mapping = {
