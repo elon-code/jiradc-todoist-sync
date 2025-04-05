@@ -67,7 +67,7 @@ async def get_open_jira_tickets():
     logging.debug(f"Using JQL Query: {jql_query}")
     query = {
         "jql": jql_query,
-        "fields": "summary,duedate,priority,status,issuetype"
+        "fields": "summary,duedate,priority,status,issuetype,description"  # Include description field
     }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=query) as response:
@@ -85,7 +85,8 @@ async def get_open_jira_tickets():
             "due_date": issue["fields"].get("duedate"),
             "priority": issue["fields"].get("priority", {}).get("name"),
             "status": issue["fields"].get("status", {}).get("name"),
-            "issuetype": issue["fields"].get("issuetype", {}).get("name")
+            "issuetype": issue["fields"].get("issuetype", {}).get("name"),
+            "description": issue["fields"].get("description")  # Fetch description
         }
         for issue in issues
     ]
@@ -108,12 +109,19 @@ async def sync_to_todoist(jira_tickets):
 
     try:
         existing_tasks = await api.get_tasks(project_id=jira_project.id)
-        existing_task_map = {task.id: task for task in existing_tasks}
+        # Normalize task keys by stripping whitespace and ensuring consistent formatting
+        existing_task_map = {}
+        for task in existing_tasks:
+            if ":" in task.content:
+                jira_key = task.content.split(":")[0].strip()
+                # Validate that the extracted key exists in Jira tickets
+                if jira_key in {ticket["key"] for ticket in jira_tickets}:
+                    existing_task_map[jira_key] = task
     except Exception as e:
         logging.error(f"Failed to retrieve existing tasks: {e}")
         return
 
-    green_resolution_statuses = await get_green_resolution_statuses()
+    # Prepare batch updates, additions, and deletions
     tasks_to_update = []
     tasks_to_add = []
     tasks_to_delete = []
@@ -125,14 +133,13 @@ async def sync_to_todoist(jira_tickets):
 
     for ticket in jira_tickets:
         if ticket["status"] in {"Blocked", "Cancelled"}:
-            continue
-        if ticket["issuetype"] == "Service Request":
-            logging.debug(f"Handling Jira Service Management task: {ticket['key']}")
+            continue  # Skip blocked or cancelled tickets
 
-        task_content = f"{ticket['key']}: {ticket['summary']}"
+        task_content = f"{ticket['key']}: {ticket['summary']}".strip()
         task_due_date = ticket["due_date"]
         task_priority = 4
-        task_description = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
+        jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
+        task_description = f"{jira_link}\n\n{ticket.get('description', '')}"  # Add link at the top, followed by description
 
         if ticket["priority"]:
             priority_mapping = {
@@ -145,6 +152,7 @@ async def sync_to_todoist(jira_tickets):
             task_priority = priority_mapping.get(ticket["priority"], 4)
 
         if ticket["key"] in existing_task_map:
+            # Update existing task
             existing_task = existing_task_map[ticket["key"]]
             tasks_to_update.append({
                 "task_id": existing_task.id,
@@ -154,6 +162,7 @@ async def sync_to_todoist(jira_tickets):
                 "description": task_description
             })
         else:
+            # Add new task
             tasks_to_add.append({
                 "content": task_content,
                 "project_id": jira_project.id,
@@ -161,10 +170,12 @@ async def sync_to_todoist(jira_tickets):
                 "priority": task_priority,
                 "description": task_description
             })
+
     for task_key, task in existing_task_map.items():
         if task_key in blocked_or_cancelled_ticket_keys:
             tasks_to_delete.append(task.id)
 
+    # Perform batch updates asynchronously
     update_tasks = [api.update_task(**task) for task in tasks_to_update]
     add_tasks = [api.add_task(**task) for task in tasks_to_add]
     delete_tasks = [api.delete_task(task_id=task_id) for task_id in tasks_to_delete]
