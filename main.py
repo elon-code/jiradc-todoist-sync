@@ -91,8 +91,63 @@ async def get_open_jira_tickets():
         for issue in issues
     ]
 
+async def get_jira_comments(ticket_key):
+    """Fetch comments for a Jira ticket."""
+    url = f"{JIRA_SERVER_URL}/rest/api/2/issue/{ticket_key}/comment"
+    headers = {
+        "Authorization": f"Bearer {JIRA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                logging.error(f"Error fetching comments for {ticket_key}: {response.status} - {await response.text()}")
+                return []
+            response_json = await response.json()
+            comments = response_json.get("comments", [])
+            return [comment["body"] for comment in comments]
+
+async def get_todoist_comments(api, task_id):
+    """Fetch comments for a Todoist task."""
+    try:
+        comments = await api.get_comments(task_id=task_id)
+        return {comment.content: comment.id for comment in comments}  # Map content to comment ID
+    except Exception as error:
+        logging.error(f"Failed to fetch comments for task {task_id}: {error}")
+        return {}
+
+async def sync_todoist_comments(api, task_id, jira_comments):
+    """Sync Jira comments with Todoist comments."""
+    todoist_comments = await get_todoist_comments(api, task_id)
+
+    # Add or update comments from Jira
+    for jira_comment in jira_comments:
+        if jira_comment not in todoist_comments:
+            try:
+                await api.add_comment(content=jira_comment, task_id=task_id)
+                logging.info(f"Added new comment to task {task_id}: {jira_comment}")
+            except Exception as error:
+                logging.error(f"Failed to add comment to task {task_id}: {error}")
+        else:
+            # Update existing comment if needed (Todoist doesn't allow direct content comparison)
+            todoist_comment_id = todoist_comments[jira_comment]
+            try:
+                await api.update_comment(comment_id=todoist_comment_id, content=jira_comment)
+                logging.info(f"Updated comment in task {task_id}: {jira_comment}")
+            except Exception as error:
+                logging.error(f"Failed to update comment in task {task_id}: {error}")
+
+    # Delete comments in Todoist that are no longer in Jira
+    for todoist_comment, comment_id in todoist_comments.items():
+        if todoist_comment not in jira_comments:
+            try:
+                await api.delete_comment(comment_id=comment_id)
+                logging.info(f"Deleted comment from task {task_id}: {todoist_comment}")
+            except Exception as error:
+                logging.error(f"Failed to delete comment from task {task_id}: {error}")
+
 async def sync_to_todoist(jira_tickets):
-    """Sync Jira tickets to Todoist asynchronously."""
+    """Sync Jira tickets and comments to Todoist asynchronously."""
     api = TodoistAPIAsync(TODOIST_API_TOKEN)
     project_name = "Jira Tickets"
     try:
@@ -139,7 +194,8 @@ async def sync_to_todoist(jira_tickets):
         task_due_date = ticket["due_date"]
         task_priority = 4
         jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
-        task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Ensure no 'None' in description
+        comments = await get_jira_comments(ticket["key"])  # Fetch comments
+        task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Add link and description
 
         if ticket["priority"]:
             priority_mapping = {
@@ -161,15 +217,24 @@ async def sync_to_todoist(jira_tickets):
                 "priority": task_priority,
                 "description": task_description
             })
+            # Sync comments with the existing task
+            await sync_todoist_comments(api, existing_task.id, comments)
         else:
             # Add new task
-            tasks_to_add.append({
+            new_task = {
                 "content": task_content,
                 "project_id": jira_project.id,
                 "due_date": task_due_date,
                 "priority": task_priority,
                 "description": task_description
-            })
+            }
+            try:
+                created_task = await api.add_task(**new_task)
+                logging.info(f"Added new task: {created_task.id}")
+                # Sync comments with the new task
+                await sync_todoist_comments(api, created_task.id, comments)
+            except Exception as e:
+                logging.error(f"Failed to add new task: {e}")
 
     for task_key, task in existing_task_map.items():
         if task_key in blocked_or_cancelled_ticket_keys:
