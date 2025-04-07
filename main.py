@@ -30,8 +30,10 @@ def get_current_jira_user():
     }
     response = requests.get(url, headers=headers)
     response.raise_for_status()
+    user = response.json()["name"]
+    logging.info(f"Autofound Jira username: {user}")  # Log the autofound username
     logging.debug(f"Fetched current Jira user: {response.json()}")
-    return response.json()["name"]
+    return user
 
 # Update JIRA_USERNAME to fetch dynamically if not provided in config
 JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
@@ -75,9 +77,12 @@ async def get_open_jira_tickets():
                 logging.error(f"Error fetching Jira tickets: {response.status} - {await response.text()}")
                 response.raise_for_status()
             response_json = await response.json()
+            logging.debug(f"Jira API Response: {json.dumps(response_json, indent=2)}")  # Log the full response
             issues = response_json.get("issues", [])
     if not issues:
         logging.info("No tickets found.")
+    else:
+        logging.info(f"Found {len(issues)} tickets assigned to {JIRA_USERNAME}.")
     return [
         {
             "key": issue["key"],
