@@ -200,7 +200,7 @@ async def sync_to_todoist(jira_tickets):
 
         task_content = f"{ticket['key']}: {ticket['summary']}".strip()
         task_due_date = ticket["due_date"]
-        task_priority = 4
+        task_priority = 4  # Default priority
         jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
         comments = await get_jira_comments(ticket["key"])  # Fetch comments
         task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Add link and description
@@ -213,18 +213,23 @@ async def sync_to_todoist(jira_tickets):
                 "Minor": 3,
                 "Trivial": 4
             }
-            task_priority = priority_mapping.get(ticket["priority"], 4)
+            jira_priority = priority_mapping.get(ticket["priority"], 4)
+            # Invert the priority for Todoist
+            task_priority = 5 - jira_priority
+            logging.debug(f"Ticket {ticket['key']} has Jira priority '{ticket['priority']}' mapped to Todoist priority {task_priority}")
 
         if ticket["key"] in existing_task_map:
             # Update existing task
             existing_task = existing_task_map[ticket["key"]]
-            tasks_to_update.append({
+            update_payload = {
                 "task_id": existing_task.id,
                 "content": task_content,
                 "due_date": task_due_date,
                 "priority": task_priority,
                 "description": task_description
-            })
+            }
+            logging.debug(f"Updating task with payload: {update_payload}")
+            tasks_to_update.append(update_payload)
             # Sync comments with the existing task
             await sync_todoist_comments(api, existing_task.id, comments)
         else:
@@ -236,6 +241,7 @@ async def sync_to_todoist(jira_tickets):
                 "priority": task_priority,
                 "description": task_description
             }
+            logging.debug(f"Creating new task with payload: {new_task}")
             try:
                 created_task = await api.add_task(**new_task)
                 logging.info(f"Added new task: {created_task.id}")
