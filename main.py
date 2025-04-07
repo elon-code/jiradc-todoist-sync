@@ -58,7 +58,7 @@ async def get_green_resolution_statuses():
 async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
     green_statuses = await get_green_resolution_statuses()
-    excluded_statuses = ["Blocked", "Cancelled"] + green_statuses
+    excluded_statuses = ["Blocked"] + green_statuses  # Removed explicit "Canceled"
     excluded_statuses_jql = ", ".join(f'"{status}"' for status in excluded_statuses)
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
     headers = {
@@ -132,7 +132,7 @@ async def sync_todoist_comments(api, task_id, jira_comments):
                 await api.add_comment(content=jira_comment, task_id=task_id)
                 logging.info(f"Added new comment to task {task_id}: {jira_comment}")
             except Exception as error:
-                logging.error(f"Failed to add comment to task {task_id}: {error}")
+                logging.error(f"Failed to add comment to task {task_id}: {jira_comment}. Error: {error}")
         else:
             # Update existing comment if needed (Todoist doesn't allow direct content comparison)
             todoist_comment_id = todoist_comments[jira_comment]
@@ -140,7 +140,9 @@ async def sync_todoist_comments(api, task_id, jira_comments):
                 await api.update_comment(comment_id=todoist_comment_id, content=jira_comment)
                 logging.info(f"Updated comment in task {task_id}: {jira_comment}")
             except Exception as error:
-                logging.error(f"Failed to update comment in task {task_id}: {error}")
+                logging.error(f"Failed to update comment in task {task_id}: {jira_comment}. Error: {error}")
+                # Skip problematic comment and continue with others
+                continue
 
     # Delete comments in Todoist that are no longer in Jira
     for todoist_comment, comment_id in todoist_comments.items():
@@ -149,7 +151,7 @@ async def sync_todoist_comments(api, task_id, jira_comments):
                 await api.delete_comment(comment_id=comment_id)
                 logging.info(f"Deleted comment from task {task_id}: {todoist_comment}")
             except Exception as error:
-                logging.error(f"Failed to delete comment from task {task_id}: {error}")
+                logging.error(f"Failed to delete comment from task {task_id}: {todoist_comment}. Error: {error}")
 
 async def sync_to_todoist(jira_tickets):
     """Sync Jira tickets and comments to Todoist asynchronously."""
@@ -174,9 +176,7 @@ async def sync_to_todoist(jira_tickets):
         for task in existing_tasks:
             if ":" in task.content:
                 jira_key = task.content.split(":")[0].strip()
-                # Validate that the extracted key exists in Jira tickets
-                if jira_key in {ticket["key"] for ticket in jira_tickets}:
-                    existing_task_map[jira_key] = task
+                existing_task_map[jira_key] = task
     except Exception as e:
         logging.error(f"Failed to retrieve existing tasks: {e}")
         return
@@ -187,13 +187,16 @@ async def sync_to_todoist(jira_tickets):
     tasks_to_delete = []
 
     jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
-    blocked_or_cancelled_ticket_keys = {
-        ticket["key"] for ticket in jira_tickets if ticket["status"] in {"Blocked", "Cancelled"}
-    }
+
+    # Identify tasks to delete (tasks that no longer exist in Jira)
+    for task_key, task in existing_task_map.items():
+        if task_key not in jira_ticket_keys:
+            tasks_to_delete.append(task.id)
+            logging.debug(f"Marked task for deletion: {task_key} (Task ID: {task.id})")
 
     for ticket in jira_tickets:
-        if ticket["status"] in {"Blocked", "Cancelled"}:
-            continue  # Skip blocked or cancelled tickets
+        if ticket["status"] in {"Blocked"}:  # Skip blocked tickets
+            continue
 
         task_content = f"{ticket['key']}: {ticket['summary']}".strip()
         task_due_date = ticket["due_date"]
@@ -241,13 +244,8 @@ async def sync_to_todoist(jira_tickets):
             except Exception as e:
                 logging.error(f"Failed to add new task: {e}")
 
-    for task_key, task in existing_task_map.items():
-        if task_key in blocked_or_cancelled_ticket_keys:
-            tasks_to_delete.append(task.id)
-
     # Perform batch updates asynchronously
     update_tasks = [api.update_task(**task) for task in tasks_to_update]
-    add_tasks = [api.add_task(**task) for task in tasks_to_add]
     delete_tasks = [api.delete_task(task_id=task_id) for task_id in tasks_to_delete]
 
     try:
@@ -257,16 +255,10 @@ async def sync_to_todoist(jira_tickets):
         logging.error(f"Failed to update some tasks: {e}")
 
     try:
-        await asyncio.gather(*add_tasks)
-        logging.info(f"Added {len(add_tasks)} tasks.")
-    except Exception as e:
-        logging.error(f"Failed to add some tasks: {e}")
-
-    try:
         await asyncio.gather(*delete_tasks)
-        logging.info(f"Deleted {len(delete_tasks)} blocked tasks.")
+        logging.info(f"Deleted {len(delete_tasks)} tasks.")
     except Exception as e:
-        logging.error(f"Failed to delete some blocked tasks: {e}")
+        logging.error(f"Failed to delete some tasks: {e}")
 
 async def run_service():
     """Run the sync process as a service, checking every 5 minutes."""
