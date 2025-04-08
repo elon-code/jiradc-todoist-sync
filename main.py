@@ -116,7 +116,7 @@ async def get_todoist_comments(api, task_id):
     """Fetch comments for a Todoist task."""
     try:
         comments = await api.get_comments(task_id=task_id)
-        return {comment.content: comment.id for comment in comments}  # Map content to comment ID
+        return [{"content": comment.content, "id": comment.id} for comment in comments]  # Use a list to handle duplicates
     except Exception as error:
         logging.error(f"Failed to fetch comments for task {task_id}: {error}")
         return {}
