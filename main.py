@@ -4,11 +4,23 @@ import json
 import urllib.parse
 import asyncio
 import logging
+import os  # Add this import for file operations
 from todoist_api_python.api_async import TodoistAPIAsync  # Use the async version of the API
-import typing
+
+# Ensure config.json exists
+CONFIG_FILE = "config.json"
+if not os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "w") as config_file:
+        json.dump({
+            "server_url": "",
+            "api_token": "",
+            "todoist_api_token": "",
+            "debug": False
+        }, config_file)
+    logging.warning(f"{CONFIG_FILE} not found. Created an empty config file. Please populate it with the required values.")
 
 # Load configuration from config.json
-with open("config.json", "r") as config_file:
+with open(CONFIG_FILE, "r") as config_file:
     config = json.load(config_file)
 
 JIRA_SERVER_URL = config["server_url"]
@@ -22,7 +34,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-def get_current_jira_user() -> str:
+def get_current_jira_user():
     """Fetch the current Jira user based on the API token."""
     url = f"{JIRA_SERVER_URL}/rest/api/2/myself"
     headers = {
@@ -39,7 +51,7 @@ def get_current_jira_user() -> str:
 # Update JIRA_USERNAME to fetch dynamically if not provided in config
 JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
 
-async def get_green_resolution_statuses() -> list[str]:
+async def get_green_resolution_statuses():
     """Fetch all Jira statuses and identify green resolution statuses asynchronously."""
     url = f"{JIRA_SERVER_URL}/rest/api/2/status"
     headers = {
@@ -56,7 +68,7 @@ async def get_green_resolution_statuses() -> list[str]:
             logging.debug(f"Green resolution statuses: {green_statuses}")
             return green_statuses
 
-async def get_open_jira_tickets() -> list[dict[str, typing.Any]]:
+async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
     green_statuses = await get_green_resolution_statuses()
     excluded_statuses = ["Blocked"] + green_statuses  # Removed explicit "Canceled"
@@ -97,7 +109,7 @@ async def get_open_jira_tickets() -> list[dict[str, typing.Any]]:
         for issue in issues
     ]
 
-async def get_jira_comments(ticket_key: str) -> list[str]:
+async def get_jira_comments(ticket_key):
     """Fetch comments for a Jira ticket."""
     url = f"{JIRA_SERVER_URL}/rest/api/2/issue/{ticket_key}/comment"
     headers = {
@@ -113,17 +125,16 @@ async def get_jira_comments(ticket_key: str) -> list[str]:
             comments = response_json.get("comments", [])
             return [comment["body"] for comment in comments]
 
-async def get_todoist_comments(api: TodoistAPIAsync, task_id: int) -> dict[str, int]:
+async def get_todoist_comments(api, task_id):
     """Fetch comments for a Todoist task."""
     try:
         comments = await api.get_comments(task_id=task_id)
-        # Convert to a dictionary with content as the key and ID as the value
-        return {comment.content: comment.id for comment in comments}
+        return [{"content": comment.content, "id": comment.id} for comment in comments]  # Use a list to handle duplicates
     except Exception as error:
         logging.error(f"Failed to fetch comments for task {task_id}: {error}")
         return {}
 
-async def sync_todoist_comments(api: TodoistAPIAsync, task_id: int, jira_comments: list[str]) -> None:
+async def sync_todoist_comments(api, task_id, jira_comments):
     """Sync Jira comments with Todoist comments."""
     todoist_comments = await get_todoist_comments(api, task_id)
 
@@ -155,7 +166,7 @@ async def sync_todoist_comments(api: TodoistAPIAsync, task_id: int, jira_comment
             except Exception as error:
                 logging.error(f"Failed to delete comment from task {task_id}: {todoist_comment}. Error: {error}")
 
-async def sync_to_todoist(jira_tickets: list[dict[str, typing.Any]]) -> None:
+async def sync_to_todoist(jira_tickets):
     """Sync Jira tickets and comments to Todoist asynchronously."""
     api = TodoistAPIAsync(TODOIST_API_TOKEN)
     project_name = "Jira Tickets"
@@ -268,7 +279,7 @@ async def sync_to_todoist(jira_tickets: list[dict[str, typing.Any]]) -> None:
     except Exception as e:
         logging.error(f"Failed to delete some tasks: {e}")
 
-async def run_service() -> None:
+async def run_service():
     """Run the sync process as a service, checking every 5 minutes."""
     while True:
         logging.info("Starting Jira to Todoist sync...")
