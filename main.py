@@ -70,15 +70,13 @@ async def get_green_resolution_statuses():
 
 async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
-    green_statuses = await get_green_resolution_statuses()
-    excluded_statuses = ["Blocked"] + green_statuses  # Removed explicit "Canceled"
-    excluded_statuses_jql = ", ".join(f'"{status}"' for status in excluded_statuses)
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
     headers = {
         "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    jql_query = f'assignee = "{JIRA_USERNAME}" AND status NOT IN ({excluded_statuses_jql})'
+    # Use resolution filter to only fetch unresolved tickets and exclude blocked and cancelled
+    jql_query = f'assignee = "{JIRA_USERNAME}" AND resolution = Unresolved AND status NOT IN ("Blocked","Canceled","Cancelled")'
     logging.debug(f"Using JQL Query: {jql_query}")
     query = {
         "jql": jql_query,
@@ -129,7 +127,8 @@ async def get_todoist_comments(api, task_id):
     """Fetch comments for a Todoist task."""
     try:
         comments = await api.get_comments(task_id=task_id)
-        return [{"content": comment.content, "id": comment.id} for comment in comments]  # Use a list to handle duplicates
+        # Return a mapping of comment content to its id for lookup
+        return {comment.content: comment.id for comment in comments}
     except Exception as error:
         logging.error(f"Failed to fetch comments for task {task_id}: {error}")
         return {}
