@@ -4,10 +4,23 @@ import json
 import urllib.parse
 import asyncio
 import logging
+import os  # Add this import for file operations
 from todoist_api_python.api_async import TodoistAPIAsync  # Use the async version of the API
 
+# Ensure config.json exists
+CONFIG_FILE = "config.json"
+if not os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "w") as config_file:
+        json.dump({
+            "server_url": "",
+            "api_token": "",
+            "todoist_api_token": "",
+            "debug": False
+        }, config_file)
+    logging.warning(f"{CONFIG_FILE} not found. Created an empty config file. Please populate it with the required values.")
+
 # Load configuration from config.json
-with open("config.json", "r") as config_file:
+with open(CONFIG_FILE, "r") as config_file:
     config = json.load(config_file)
 
 JIRA_SERVER_URL = config["server_url"]
@@ -57,15 +70,13 @@ async def get_green_resolution_statuses():
 
 async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
-    green_statuses = await get_green_resolution_statuses()
-    excluded_statuses = ["Blocked"] + green_statuses  # Removed explicit "Canceled"
-    excluded_statuses_jql = ", ".join(f'"{status}"' for status in excluded_statuses)
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
     headers = {
         "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    jql_query = f'assignee = "{JIRA_USERNAME}" AND status NOT IN ({excluded_statuses_jql})'
+    # Use resolution filter to only fetch unresolved tickets and exclude blocked and cancelled
+    jql_query = f'assignee = "{JIRA_USERNAME}" AND resolution = Unresolved AND status NOT IN ("Blocked","Canceled","Cancelled")'
     logging.debug(f"Using JQL Query: {jql_query}")
     query = {
         "jql": jql_query,
@@ -116,7 +127,8 @@ async def get_todoist_comments(api, task_id):
     """Fetch comments for a Todoist task."""
     try:
         comments = await api.get_comments(task_id=task_id)
-        return [{"content": comment.content, "id": comment.id} for comment in comments]  # Use a list to handle duplicates
+        # Return a mapping of comment content to its id for lookup
+        return {comment.content: comment.id for comment in comments}
     except Exception as error:
         logging.error(f"Failed to fetch comments for task {task_id}: {error}")
         return {}
