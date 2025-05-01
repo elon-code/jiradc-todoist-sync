@@ -1,11 +1,16 @@
 import requests
+from requests.adapters import HTTPAdapter
 import aiohttp
 import json
 import urllib.parse
 import asyncio
 import logging
 import os  # Add this import for file operations
+from aiohttp import TCPConnector
 from todoist_api_python.api_async import TodoistAPIAsync  # Use the async version of the API
+
+# Shared aiohttp session placeholder (will be created inside run_service)
+shared_session = None
 
 # Ensure config.json exists
 CONFIG_FILE = "config.json"
@@ -51,23 +56,6 @@ def get_current_jira_user():
 # Update JIRA_USERNAME to fetch dynamically if not provided in config
 JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
 
-async def get_green_resolution_statuses():
-    """Fetch all Jira statuses and identify green resolution statuses asynchronously."""
-    url = f"{JIRA_SERVER_URL}/rest/api/2/status"
-    headers = {
-        "Authorization": f"Bearer {JIRA_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                logging.error(f"Error fetching Jira statuses: {response.status} - {await response.text()}")
-                response.raise_for_status()
-            statuses = await response.json()
-            green_statuses = [status["name"] for status in statuses if status.get("statusCategory", {}).get("key") == "done"]
-            logging.debug(f"Green resolution statuses: {green_statuses}")
-            return green_statuses
-
 async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
     url = f"{JIRA_SERVER_URL}/rest/api/2/search"
@@ -82,14 +70,14 @@ async def get_open_jira_tickets():
         "jql": jql_query,
         "fields": "summary,duedate,priority,status,issuetype,description"  # Include description field
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=query) as response:
-            if response.status != 200:
-                logging.error(f"Error fetching Jira tickets: {response.status} - {await response.text()}")
-                response.raise_for_status()
-            response_json = await response.json()
-            logging.debug(f"Jira API Response: {json.dumps(response_json, indent=2)}")  # Log the full response
-            issues = response_json.get("issues", [])
+    # Use shared aiohttp session
+    async with shared_session.get(url, headers=headers, params=query) as response:
+        if response.status != 200:
+            logging.error(f"Error fetching Jira tickets: {response.status} - {await response.text()}")
+            response.raise_for_status()
+        response_json = await response.json()
+        logging.debug(f"Jira API Response: {json.dumps(response_json, indent=2)}")  # Log the full response
+        issues = response_json.get("issues", [])
     if not issues:
         logging.info("No tickets found.")
     else:
@@ -114,14 +102,14 @@ async def get_jira_comments(ticket_key):
         "Authorization": f"Bearer {JIRA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                logging.error(f"Error fetching comments for {ticket_key}: {response.status} - {await response.text()}")
-                return []
-            response_json = await response.json()
-            comments = response_json.get("comments", [])
-            return [comment["body"] for comment in comments]
+    # Use shared aiohttp session
+    async with shared_session.get(url, headers=headers) as response:
+        if response.status != 200:
+            logging.error(f"Error fetching comments for {ticket_key}: {response.status} - {await response.text()}")
+            return []
+        response_json = await response.json()
+        comments = response_json.get("comments", [])
+        return [comment["body"] for comment in comments]
 
 async def get_todoist_comments(api, task_id):
     """Fetch comments for a Todoist task."""
@@ -167,7 +155,13 @@ async def sync_todoist_comments(api, task_id, jira_comments):
 
 async def sync_to_todoist(jira_tickets):
     """Sync Jira tickets and comments to Todoist asynchronously."""
-    api = TodoistAPIAsync(TODOIST_API_TOKEN)
+    # Use a dedicated synchronous requests.Session for Todoist calls
+    todoist_session = requests.Session()
+    # Increase connection pool size for Todoist API and block when full
+    adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, pool_block=True)
+    todoist_session.mount("https://api.todoist.com/", adapter)
+    todoist_session.mount("http://api.todoist.com/", adapter)
+    api = TodoistAPIAsync(TODOIST_API_TOKEN, session=todoist_session)
     project_name = "Jira Tickets"
     try:
         projects = await api.get_projects()
@@ -277,19 +271,27 @@ async def sync_to_todoist(jira_tickets):
         logging.info(f"Deleted {len(delete_tasks)} tasks.")
     except Exception as e:
         logging.error(f"Failed to delete some tasks: {e}")
+    finally:
+        # Clean up the synchronous session
+        todoist_session.close()
 
 async def run_service():
     """Run the sync process as a service, checking every 5 minutes."""
-    while True:
-        logging.info("Starting Jira to Todoist sync...")
-        try:
-            jira_tickets = await get_open_jira_tickets()
-            logging.debug(f"Jira Tickets: {jira_tickets}")
-            await sync_to_todoist(jira_tickets)
-        except Exception as e:
-            logging.error(f"Error during sync: {e}")
-        logging.info("Sync complete. Waiting for 5 minutes...")
-        await asyncio.sleep(300)
+    # Create session within running loop to bind to correct event loop
+    connector = TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        global shared_session
+        shared_session = session
+        while True:
+            logging.info("Starting Jira to Todoist sync...")
+            try:
+                jira_tickets = await get_open_jira_tickets()
+                logging.debug(f"Jira Tickets: {jira_tickets}")
+                await sync_to_todoist(jira_tickets)
+            except Exception as e:
+                logging.error(f"Error during sync: {e}")
+            logging.info("Sync complete. Waiting for 5 minutes...")
+            await asyncio.sleep(300)
 
 if __name__ == "__main__":
     asyncio.run(run_service())
