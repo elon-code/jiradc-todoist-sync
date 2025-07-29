@@ -4,11 +4,7 @@ This document explains the configuration options for the Jira-Todoist sync tool.
 
 ## Quick Start
 
-1. **Set up API tokens** (required first step):
-   ```bash
-   python3 setup.py
-   ```
-   Or manually set environment variables:
+1. **Set environment variables** (optional but recommended):
    ```bash
    # Windows PowerShell
    $env:JIRA_API_TOKEN="your_jira_token_here"
@@ -28,20 +24,22 @@ This document explains the configuration options for the Jira-Todoist sync tool.
 
 3. **Run the application**:
    ```bash
-   python3 main.py
+   python main.py
    ```
+   
+   💡 If environment variables aren't set, you'll be prompted to enter your API tokens.
 
 ## Security-First Design
 
-🔐 **API tokens are NEVER stored in configuration files by default**
+🔐 **Simple and secure credential handling**
 
-- **Environment variables**: Primary method (secure, flexible)
-- **Runtime prompting**: Fallback if environment variables not found
-- **Config file storage**: Available but discouraged (must be explicitly enabled)
+- **Environment variables**: Check first (secure, convenient)
+- **Interactive prompts**: Fallback if environment variables not found
+- **No credential storage**: API tokens are never saved to files
 
 ## Configuration Structure
 
-The `config.json` file contains application settings but **no API tokens**:
+The `config.json` file contains application settings:
 
 ```json
 {
@@ -57,16 +55,6 @@ The `config.json` file contains application settings but **no API tokens**:
     "priority_mapping": { ... },
     "skip_statuses": [...],
     "exclude_statuses": [...]
-  },
-  "api_credentials": {
-    "jira": {
-      "use_env_var": true,
-      "env_var_name": "JIRA_API_TOKEN"
-    },
-    "todoist": {
-      "use_env_var": true,
-      "env_var_name": "TODOIST_API_TOKEN"
-    }
   }
 }
 ```
@@ -79,66 +67,13 @@ The `config.json` file contains application settings but **no API tokens**:
 - API tokens are handled via environment variables
 - Users can clone and run immediately after setting env vars
 
-## Advanced Options
-
-### Custom Environment Variable Names
-```json
-{
-  "api_credentials": {
-    "jira": {
-      "use_env_var": true,
-      "env_var_name": "MY_CUSTOM_JIRA_TOKEN"
-    }
-  }
-}
-```
-
-### Local Override (Not Recommended)
-If you prefer to store tokens in a config file:
-
-1. Create `config.local.json` (gitignored):
-   ```json
-   {
-     "api_token": "your_jira_token",
-     "todoist_api_token": "your_todoist_token",
-     "api_credentials": {
-       "jira": { "use_env_var": false },
-       "todoist": { "use_env_var": false }
-     }
-   }
-   ```
-
-2. The app will load this automatically
-
-### Configuration Hierarchy
-1. `config.local.json` (if exists, highest priority)
-2. `config.json` (main configuration)
-3. Environment variables (if `use_env_var: true`)
-4. Runtime prompting (fallback)
-
-## Migration from Previous Versions
-
-If you have an old `config.json` with API tokens:
-
-1. **Run setup**: `python3 setup.py`
-2. **Remove tokens** from `config.json`
-3. **Set `use_env_var: true`** in the api_credentials section
-
-## Security Best Practices
-
-1. ✅ **Use environment variables** (default)
-2. ✅ **Never commit API tokens** to git
-3. ✅ **Regularly rotate** your API tokens
-4. ✅ **Use the setup script** for easy configuration
-5. ❌ **Avoid storing tokens** in configuration files
-
 ## Troubleshooting
 
 ### "API tokens not found"
-- Ensure environment variables are set in the same shell session
-- Use `echo $JIRA_API_TOKEN` (Linux/Mac) or `echo $env:JIRA_API_TOKEN` (Windows) to verify
-- Run `python3 setup.py` for guided setup
+- Set environment variables: `$env:JIRA_API_TOKEN="token"` and `$env:TODOIST_API_TOKEN="token"`
+- Or simply run `python main.py` and enter tokens when prompted
+- Use `echo $env:JIRA_API_TOKEN` (Windows) to verify environment variables
 
 ### "Permission denied" errors
 - Verify your API tokens have the correct permissions
-- Check that your Jira server URL is correct
+- Check that your Jira server URL is correct in config.json
