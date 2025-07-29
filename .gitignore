@@ -172,5 +172,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-config.json
 run_jira_sync.bat

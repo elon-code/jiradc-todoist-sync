@@ -1,0 +1,31 @@
+{
+  "server_url": "https://jira.slac.stanford.edu",
+  "debug": false,
+  "sync_interval_minutes": 5,
+  "jira_username": "",
+  "settings": {
+    "default_priority": 4,
+    "sleep_chunk_size": 10,
+    "project_name": "Jira Tickets",
+    "connection_pool_size": 20,
+    "priority_mapping": {
+      "Blocker": 1,
+      "Critical": 1,
+      "Major": 2,
+      "Minor": 3,
+      "Trivial": 4
+    },
+    "skip_statuses": ["Blocked"],
+    "exclude_statuses": ["Blocked", "Canceled", "Cancelled", "Backlog", "Done"]
+  },
+  "api_credentials": {
+    "jira": {
+      "use_env_var": true,
+      "env_var_name": "JIRA_API_TOKEN"
+    },
+    "todoist": {
+      "use_env_var": true,
+      "env_var_name": "TODOIST_API_TOKEN"
+    }
+  }
+}
