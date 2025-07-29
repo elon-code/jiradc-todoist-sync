@@ -113,8 +113,15 @@ async def sync_to_todoist(config: Dict[str, Any], jira_tickets: List[Dict[str, A
                 
                 task_priority = default_priority  # Default priority
                 jira_link = f"{config['server_url']}/browse/{ticket['key']}"
-                comments = await get_jira_comments(config, ticket["key"], session)  # Fetch comments
-                task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Add link and description
+                
+                # Construct task description - only add newlines if there's actual description content
+                ticket_description = ticket.get('description', '') or ''
+                if ticket_description.strip():
+                    # Clean up the description by normalizing whitespace
+                    ticket_description = ticket_description.strip()
+                    task_description = f"{jira_link}\n\n{ticket_description}"
+                else:
+                    task_description = jira_link
 
                 if ticket["priority"]:
                     jira_priority = priority_mapping.get(ticket["priority"], default_priority)
@@ -129,21 +136,27 @@ async def sync_to_todoist(config: Dict[str, Any], jira_tickets: List[Dict[str, A
                     existing_task = existing_task_map[ticket["key"]]
                     needs_update = False
                     update_payload = {"task_id": existing_task.id}
+                    change_reasons = []
                     
                     # Check if content changed
                     if existing_task.content != task_content:
                         update_payload["content"] = task_content
                         needs_update = True
+                        change_reasons.append(f"content: '{existing_task.content}' -> '{task_content}'")
                     
                     # Check if priority changed
                     if existing_task.priority != task_priority:
                         update_payload["priority"] = task_priority
                         needs_update = True
+                        change_reasons.append(f"priority: {existing_task.priority} -> {task_priority}")
                     
                     # Check if description changed
-                    if getattr(existing_task, 'description', '') != task_description:
+                    existing_description = getattr(existing_task, 'description', '') or ''
+                    # Normalize whitespace for comparison to avoid false positives
+                    if existing_description.strip() != task_description.strip():
                         update_payload["description"] = task_description
                         needs_update = True
+                        change_reasons.append(f"description: '{existing_description}' -> '{task_description}'")
                     
                     # Check if due date changed
                     existing_due = getattr(existing_task, 'due', None)
@@ -151,18 +164,27 @@ async def sync_to_todoist(config: Dict[str, Any], jira_tickets: List[Dict[str, A
                     if existing_due_date != task_due_date:
                         if task_due_date:
                             update_payload["due_date"] = task_due_date
-                        needs_update = True
+                            needs_update = True
+                            change_reasons.append(f"due_date: {existing_due_date} -> {task_due_date}")
+                        elif existing_due_date is not None:
+                            # Remove due date if Jira task no longer has one
+                            update_payload["due_date"] = None
+                            needs_update = True
+                            change_reasons.append(f"due_date: {existing_due_date} -> None")
+                        # If both are None, no update needed
                     
                     # Only update if changes detected
                     if needs_update:
                         if debug_mode:
-                            logging.debug(f"Updating task {ticket['key']} with payload: {update_payload}")
+                            logging.debug(f"Updating task {ticket['key']} - Changes: {'; '.join(change_reasons)}")
+                            logging.debug(f"Update payload: {update_payload}")
                         tasks_to_update.append(update_payload)
                     else:
                         if debug_mode:
                             logging.debug(f"No changes detected for task {ticket['key']}, skipping update")
                     
-                    # Sync comments with the existing task
+                    # Always sync comments for existing tasks (simple approach)
+                    comments = await get_jira_comments(config, ticket["key"], session)
                     await sync_todoist_comments(api, existing_task.id, comments)
                 else:
                     # Add new task
@@ -180,7 +202,8 @@ async def sync_to_todoist(config: Dict[str, Any], jira_tickets: List[Dict[str, A
                     try:
                         created_task = await api.add_task(**new_task)
                         logging.info(f"Added new task: {created_task.id}")
-                        # Sync comments with the new task
+                        # Fetch and sync comments for new tasks
+                        comments = await get_jira_comments(config, ticket["key"], session)
                         await sync_todoist_comments(api, created_task.id, comments)
                     except Exception as e:
                         logging.error(f"Failed to add new task: {e}")
