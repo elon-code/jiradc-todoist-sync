@@ -1,51 +1,182 @@
 import asyncio
 import json
 import logging
-import os  # Add this import for file operations
-
-import aiohttp
+import os
+import getpass
+import urllib.parse
 import requests
+import aiohttp
+from datetime import datetime, date
 from aiohttp import TCPConnector
 from requests.adapters import HTTPAdapter
-from todoist_api_python.api_async import (
-    TodoistAPIAsync,  # Use the async version of the API
-)
+from todoist_api_python.api_async import TodoistAPIAsync
 
-# Shared aiohttp session placeholder (will be created inside run_service)
-shared_session = None
+async def test_jira_credentials(server_url, api_token):
+    """Test Jira credentials by making a simple API call"""
+    try:
+        url = f"{server_url}/rest/api/2/myself"
+        headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    user_data = await response.json()
+                    return True, user_data.get("displayName", "Unknown User")
+                elif response.status == 401:
+                    return False, "Invalid API token or insufficient permissions"
+                elif response.status == 404:
+                    return False, "Server URL not found - check your Jira server address"
+                else:
+                    error_text = await response.text()
+                    return False, f"HTTP {response.status}: {error_text}"
+    except Exception as e:
+        return False, f"Connection error: {str(e)}"
 
-# Ensure config.json exists
+async def test_todoist_credentials(api_token):
+    """Test Todoist credentials by making a simple API call"""
+    try:
+        api = TodoistAPIAsync(api_token)
+        projects_result = await api.get_projects()
+        # Handle both async generator and regular list cases
+        if hasattr(projects_result, '__aiter__'):
+            # It's an async generator, convert to list
+            projects_nested = [p async for p in projects_result]
+            # The API returns a list inside the async generator
+            project_list = projects_nested[0] if projects_nested and isinstance(projects_nested[0], list) else projects_nested
+        else:
+            # It's already a list
+            project_list = projects_result
+            
+        return True, f"Found {len(project_list)} projects"
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            return False, "Invalid Todoist API token"
+        else:
+            return False, f"Error connecting to Todoist: {error_msg}"
+
+async def prompt_for_config():
+    """Prompt user for configuration values and save to config.json"""
+    print("🔧 Setting up Jira-Todoist Sync Configuration")
+    print("=" * 50)
+    
+    config = {}
+    
+    # Prompt for server URL
+    while True:
+        server_url = input("Enter your Jira server URL: ").strip()
+        if server_url:
+            # Auto-add https:// if no protocol specified
+            if not server_url.startswith(('http://', 'https://')):
+                server_url = f"https://{server_url}"
+            
+            # Parse and validate URL
+            try:
+                parsed = urllib.parse.urlparse(server_url)
+                if not parsed.netloc or not parsed.scheme:
+                    raise ValueError("Invalid URL")
+                
+                # Reconstruct clean URL
+                clean_url = f"{parsed.scheme}://{parsed.netloc}"
+                config["server_url"] = clean_url.rstrip('/')
+                print(f"✅ Server URL set to: {config['server_url']}")
+                break
+                
+            except ValueError:
+                print("❌ Invalid URL. Please try again.")
+                continue
+                
+        print("❌ Server URL is required. Please try again.")
+    
+    # Prompt for Jira API token with validation
+    while True:
+        api_token = getpass.getpass("Enter your Jira API token (input will be hidden): ").strip()
+        if api_token:
+            print("🔍 Testing Jira credentials...")
+            success, message = await test_jira_credentials(config["server_url"], api_token)
+            if success:
+                print(f"✅ Jira credentials verified! Connected as: {message}")
+                config["api_token"] = api_token
+                break
+            else:
+                print(f"❌ Jira credential test failed: {message}")
+                retry = input("Would you like to try again? (y/N): ").strip().lower()
+                if retry not in ['y', 'yes']:
+                    print("⚠️  Continuing with unverified credentials...")
+                    config["api_token"] = api_token
+                    break
+        else:
+            print("❌ Jira API token is required. Please try again.")
+    
+    # Prompt for Todoist API token with validation
+    while True:
+        todoist_token = getpass.getpass("Enter your Todoist API token (input will be hidden): ").strip()
+        if todoist_token:
+            print("🔍 Testing Todoist credentials...")
+            success, message = await test_todoist_credentials(todoist_token)
+            if success:
+                print(f"✅ Todoist credentials verified! {message}")
+                config["todoist_api_token"] = todoist_token
+                break
+            else:
+                print(f"❌ Todoist credential test failed: {message}")
+                retry = input("Would you like to try again? (y/N): ").strip().lower()
+                if retry not in ['y', 'yes']:
+                    print("⚠️  Continuing with unverified credentials...")
+                    config["todoist_api_token"] = todoist_token
+                    break
+        else:
+            print("❌ Todoist API token is required. Please try again.")
+    
+    # Prompt for debug mode (optional)
+    debug_input = input("Enable debug logging? (y/N): ").strip().lower()
+    config["debug"] = debug_input in ['y', 'yes', 'true']
+    
+    # Save configuration
+    try:
+        with open(CONFIG_FILE, "w") as config_file:
+            json.dump(config, config_file, indent=2)
+        print(f"\n✅ Configuration saved to {CONFIG_FILE}")
+        return config
+    except Exception as e:
+        print(f"❌ Error saving configuration: {e}")
+        exit(1)
+
+async def load_config():
+    """Load or create configuration"""
+    if not os.path.exists(CONFIG_FILE):
+        print(f"❌ {CONFIG_FILE} not found.")
+        return await prompt_for_config()
+    else:
+        # Load configuration from config.json
+        try:
+            with open(CONFIG_FILE, "r") as config_file:
+                config = json.load(config_file)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"❌ Error reading {CONFIG_FILE}: {e}")
+            return await prompt_for_config()
+
+        # Validate required configuration values
+        required_fields = ["server_url", "api_token", "todoist_api_token"]
+        missing_fields = []
+
+        for field in required_fields:
+            if not config.get(field) or config[field].strip() == "":
+                missing_fields.append(field)
+
+        if missing_fields:
+            print(f"❌ Missing required configuration fields in {CONFIG_FILE}:")
+            for field in missing_fields:
+                print(f"   - {field}")
+            print("\n🔧 Let's set up your configuration:")
+            return await prompt_for_config()
+        
+        return config
+
+# Configuration loading
 CONFIG_FILE = "config.json"
-if not os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, "w") as config_file:
-        json.dump(
-            {
-                "server_url": "",
-                "api_token": "",
-                "todoist_api_token": "",
-                "debug": False,
-            },
-            config_file,
-        )
-    logging.warning(
-        f"{CONFIG_FILE} not found. Created an empty config file. Please populate it with the required values."
-    )
-
-# Load configuration from config.json
-with open(CONFIG_FILE, "r") as config_file:
-    config = json.load(config_file)
-
-JIRA_SERVER_URL = config["server_url"]
-JIRA_API_TOKEN = config["api_token"]
-TODOIST_API_TOKEN = config["todoist_api_token"]
-
-# Configure logging
-DEBUG_MODE = config.get("debug", False)  # Enable debug mode based on config
-logging.basicConfig(
-    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
-
 
 def get_current_jira_user():
     """Fetch the current Jira user based on the API token."""
@@ -61,10 +192,22 @@ def get_current_jira_user():
     logging.debug(f"Fetched current Jira user: {response.json()}")
     return user
 
-
-# Update JIRA_USERNAME to fetch dynamically if not provided in config
-JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
-
+async def get_green_resolution_statuses():
+    """Fetch all Jira statuses and identify green resolution statuses asynchronously."""
+    url = f"{JIRA_SERVER_URL}/rest/api/2/status"
+    headers = {
+        "Authorization": f"Bearer {JIRA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                logging.error(f"Error fetching Jira statuses: {response.status} - {await response.text()}")
+                response.raise_for_status()
+            statuses = await response.json()
+            green_statuses = [status["name"] for status in statuses if status.get("statusCategory", {}).get("key") == "done"]
+            logging.debug(f"Green resolution statuses: {green_statuses}")
+            return green_statuses
 
 async def get_open_jira_tickets():
     """Fetch open Jira tickets assigned to the user, including Jira Service Management tasks."""
@@ -88,14 +231,24 @@ async def get_open_jira_tickets():
             )
             response.raise_for_status()
         response_json = await response.json()
-        logging.debug(
-            f"Jira API Response: {json.dumps(response_json, indent=2)}"
-        )  # Log the full response
+        # Only log the response in debug mode if it's a small number of tickets
+        if DEBUG_MODE and len(response_json.get("issues", [])) <= 5:
+            logging.debug(f"Jira API Response: {json.dumps(response_json, indent=2)}")
+        elif DEBUG_MODE:
+            logging.debug(f"Jira API Response: Found {len(response_json.get('issues', []))} tickets (response too large to log)")
         issues = response_json.get("issues", [])
     if not issues:
         logging.info("No tickets found.")
     else:
         logging.info(f"Found {len(issues)} tickets assigned to {JIRA_USERNAME}.")
+    
+    # Debug log just the ticket keys and summaries for overview
+    if DEBUG_MODE and issues:
+        ticket_summary = [(issue["key"], issue["fields"]["summary"][:50] + "..." if len(issue["fields"]["summary"]) > 50 else issue["fields"]["summary"]) for issue in issues[:5]]
+        logging.debug(f"First 5 tickets: {ticket_summary}")
+        if len(issues) > 5:
+            logging.debug(f"... and {len(issues) - 5} more tickets")
+    
     return [
         {
             "key": issue["key"],
@@ -132,7 +285,17 @@ async def get_jira_comments(ticket_key):
 async def get_todoist_comments(api, task_id):
     """Fetch comments for a Todoist task."""
     try:
-        comments = await api.get_comments(task_id=task_id)
+        comments_result = await api.get_comments(task_id=task_id)
+        # Handle both async generator and regular list cases
+        if hasattr(comments_result, '__aiter__'):
+            # It's an async generator, convert to list
+            comments_nested = [comment async for comment in comments_result]
+            # The API returns a list inside the async generator
+            comments = comments_nested[0] if comments_nested and isinstance(comments_nested[0], list) else comments_nested
+        else:
+            # It's already a list
+            comments = comments_result
+            
         # Return a mapping of comment content to its id for lookup
         return {comment.content: comment.id for comment in comments}
     except Exception as error:
@@ -143,42 +306,36 @@ async def get_todoist_comments(api, task_id):
 async def sync_todoist_comments(api, task_id, jira_comments):
     """Sync Jira comments with Todoist comments."""
     todoist_comments = await get_todoist_comments(api, task_id)
+    
+    changes_made = 0
 
-    # Add or update comments from Jira
+    # Add comments from Jira that don't exist in Todoist
     for jira_comment in jira_comments:
         if jira_comment not in todoist_comments:
             try:
                 await api.add_comment(content=jira_comment, task_id=task_id)
-                logging.info(f"Added new comment to task {task_id}: {jira_comment}")
+                logging.debug(f"Added new comment to task {task_id}")
+                changes_made += 1
             except Exception as error:
                 logging.error(
-                    f"Failed to add comment to task {task_id}: {jira_comment}. Error: {error}"
+                    f"Failed to add comment to task {task_id}. Error: {error}"
                 )
-        else:
-            # Update existing comment if needed (Todoist doesn't allow direct content comparison)
-            todoist_comment_id = todoist_comments[jira_comment]
-            try:
-                await api.update_comment(
-                    comment_id=todoist_comment_id, content=jira_comment
-                )
-                logging.info(f"Updated comment in task {task_id}: {jira_comment}")
-            except Exception as error:
-                logging.error(
-                    f"Failed to update comment in task {task_id}: {jira_comment}. Error: {error}"
-                )
-                # Skip problematic comment and continue with others
-                continue
 
     # Delete comments in Todoist that are no longer in Jira
     for todoist_comment, comment_id in todoist_comments.items():
         if todoist_comment not in jira_comments:
             try:
                 await api.delete_comment(comment_id=comment_id)
-                logging.info(f"Deleted comment from task {task_id}: {todoist_comment}")
+                logging.debug(f"Deleted comment from task {task_id}")
+                changes_made += 1
             except Exception as error:
                 logging.error(
-                    f"Failed to delete comment from task {task_id}: {todoist_comment}. Error: {error}"
+                    f"Failed to delete comment from task {task_id}. Error: {error}"
                 )
+    
+    # Only log if there were actual changes
+    if changes_made > 0:
+        logging.info(f"Synced {changes_made} comment changes for task {task_id}")
 
 
 async def sync_to_todoist(jira_tickets):
@@ -192,7 +349,17 @@ async def sync_to_todoist(jira_tickets):
     api = TodoistAPIAsync(TODOIST_API_TOKEN, session=todoist_session)
     project_name = "Jira Tickets"
     try:
-        projects = await api.get_projects()
+        projects_result = await api.get_projects()
+        # Handle both async generator and regular list cases
+        if hasattr(projects_result, '__aiter__'):
+            # It's an async generator, convert to list
+            projects_nested = [p async for p in projects_result]
+            # The API returns a list inside the async generator
+            projects = projects_nested[0] if projects_nested and isinstance(projects_nested[0], list) else projects_nested
+        else:
+            # It's already a list
+            projects = projects_result
+        
         jira_project = next((p for p in projects if p.name == project_name), None)
         if not jira_project:
             jira_project = await api.add_project(name=project_name)
@@ -204,7 +371,17 @@ async def sync_to_todoist(jira_tickets):
         return
 
     try:
-        existing_tasks = await api.get_tasks(project_id=jira_project.id)
+        tasks_result = await api.get_tasks(project_id=jira_project.id)
+        # Handle both async generator and regular list cases
+        if hasattr(tasks_result, '__aiter__'):
+            # It's an async generator, convert to list
+            tasks_nested = [task async for task in tasks_result]
+            # The API returns a list inside the async generator
+            existing_tasks = tasks_nested[0] if tasks_nested and isinstance(tasks_nested[0], list) else tasks_nested
+        else:
+            # It's already a list
+            existing_tasks = tasks_result
+            
         # Normalize task keys by stripping whitespace and ensuring consistent formatting
         existing_task_map = {}
         for task in existing_tasks:
@@ -233,6 +410,33 @@ async def sync_to_todoist(jira_tickets):
 
         task_content = f"{ticket['key']}: {ticket['summary']}".strip()
         task_due_date = ticket["due_date"]
+        # Convert due_date to proper format if it exists
+        if task_due_date:
+            # Ensure due_date is a date object for Todoist API
+            if isinstance(task_due_date, str):
+                # Try to parse and convert to date object
+                try:
+                    # Try parsing as YYYY-MM-DD first
+                    parsed_date = datetime.strptime(task_due_date, '%Y-%m-%d')
+                    task_due_date = parsed_date.date()  # Convert to date object
+                except ValueError:
+                    try:
+                        # Try parsing as ISO format (YYYY-MM-DDTHH:MM:SS)
+                        parsed_date = datetime.fromisoformat(task_due_date.replace('Z', '+00:00'))
+                        task_due_date = parsed_date.date()  # Convert to date object
+                    except ValueError:
+                        # If all parsing fails, set to None
+                        logging.debug(f"Could not parse due date '{task_due_date}' for ticket {ticket['key']}, setting to None")
+                        task_due_date = None
+            else:
+                # If not a string, set to None
+                logging.debug(f"Due date for ticket {ticket['key']} is not a string: {type(task_due_date)} = {task_due_date}, setting to None")
+                task_due_date = None
+        
+        # Debug logging to see what we're actually passing
+        if DEBUG_MODE:
+            logging.debug(f"Ticket {ticket['key']}: task_due_date = {task_due_date} (type: {type(task_due_date)})")
+        
         task_priority = 4  # Default priority
         jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
         comments = await get_jira_comments(ticket["key"])  # Fetch comments
@@ -259,11 +463,14 @@ async def sync_to_todoist(jira_tickets):
             update_payload = {
                 "task_id": existing_task.id,
                 "content": task_content,
-                "due_date": task_due_date,
                 "priority": task_priority,
                 "description": task_description,
             }
-            logging.debug(f"Updating task with payload: {update_payload}")
+            # Only add due_date if it's valid
+            if task_due_date:
+                update_payload["due_date"] = task_due_date
+            if DEBUG_MODE:
+                logging.debug(f"Updating task with payload: {update_payload}")
             tasks_to_update.append(update_payload)
             # Sync comments with the existing task
             await sync_todoist_comments(api, existing_task.id, comments)
@@ -272,11 +479,14 @@ async def sync_to_todoist(jira_tickets):
             new_task = {
                 "content": task_content,
                 "project_id": jira_project.id,
-                "due_date": task_due_date,
                 "priority": task_priority,
                 "description": task_description,
             }
-            logging.debug(f"Creating new task with payload: {new_task}")
+            # Only add due_date if it's valid
+            if task_due_date:
+                new_task["due_date"] = task_due_date
+            if DEBUG_MODE:
+                logging.debug(f"Creating new task with payload: {new_task}")
             try:
                 created_task = await api.add_task(**new_task)
                 logging.info(f"Added new task: {created_task.id}")
@@ -324,5 +534,34 @@ async def run_service():
             await asyncio.sleep(300)
 
 
+async def main():
+    """Main function to handle async config loading and run service"""
+    global JIRA_SERVER_URL, JIRA_API_TOKEN, TODOIST_API_TOKEN, DEBUG_MODE, JIRA_USERNAME
+    
+    config = await load_config()
+    
+    JIRA_SERVER_URL = config["server_url"].rstrip('/')  # Remove trailing slash
+    JIRA_API_TOKEN = config["api_token"]
+    TODOIST_API_TOKEN = config["todoist_api_token"]
+
+    # Configure logging
+    DEBUG_MODE = config.get("debug", False)  # Enable debug mode based on config
+    logging.basicConfig(
+        level=logging.DEBUG if DEBUG_MODE else logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    
+    # Reduce verbosity of third-party libraries in debug mode
+    if DEBUG_MODE:
+        logging.getLogger("aiohttp").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
+
+    # Update JIRA_USERNAME to fetch dynamically if not provided in config
+    JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
+    
+    # Start the service
+    await run_service()
+
 if __name__ == "__main__":
-    asyncio.run(run_service())
+    asyncio.run(main())
