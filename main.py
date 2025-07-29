@@ -8,7 +8,7 @@ import requests
 import aiohttp
 import signal
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from aiohttp import TCPConnector
 from requests.adapters import HTTPAdapter
 from todoist_api_python.api_async import TodoistAPIAsync
@@ -136,6 +136,22 @@ async def prompt_for_config():
     debug_input = input("Enable debug logging? (y/N): ").strip().lower()
     config["debug"] = debug_input in ['y', 'yes', 'true']
     
+    # Prompt for sync interval (optional)
+    while True:
+        interval_input = input("Sync interval in minutes (default: 5): ").strip()
+        if not interval_input:
+            config["sync_interval_minutes"] = 5
+            break
+        try:
+            interval = int(interval_input)
+            if interval < 1:
+                print("❌ Sync interval must be at least 1 minute.")
+                continue
+            config["sync_interval_minutes"] = interval
+            break
+        except ValueError:
+            print("❌ Please enter a valid number.")
+    
     # Save configuration
     try:
         with open(CONFIG_FILE, "w") as config_file:
@@ -177,8 +193,26 @@ async def load_config():
         
         return config
 
-# Configuration loading
+# Configuration constants
 CONFIG_FILE = "config.json"
+DEFAULT_SYNC_INTERVAL = 5  # minutes
+DEFAULT_PRIORITY = 4
+SLEEP_CHUNK_SIZE = 10  # seconds
+PROJECT_NAME = "Jira Tickets"
+CONNECTION_POOL_SIZE = 20
+
+# Priority mappings
+JIRA_TO_TODOIST_PRIORITY = {
+    "Blocker": 1,
+    "Critical": 1, 
+    "Major": 2,
+    "Minor": 3,
+    "Trivial": 4,
+}
+
+# Jira statuses to skip
+SKIP_STATUSES = {"Blocked"}
+EXCLUDE_STATUSES = ["Blocked", "Canceled", "Cancelled", "Backlog", "Done"]
 
 def get_current_jira_user():
     """Fetch the current Jira user based on the API token."""
@@ -310,12 +344,22 @@ async def sync_todoist_comments(api, task_id, jira_comments):
     todoist_comments = await get_todoist_comments(api, task_id)
     
     changes_made = 0
+    
+    # Normalize comments for comparison by stripping whitespace and converting to lowercase
+    def normalize_comment(comment):
+        if not comment:
+            return ""
+        return comment.strip().lower()
+    
+    # Create normalized versions for comparison
+    normalized_jira_comments = {normalize_comment(comment): comment for comment in jira_comments if comment and comment.strip()}
+    normalized_todoist_comments = {normalize_comment(content): (content, comment_id) for content, comment_id in todoist_comments.items() if content and content.strip()}
 
     # Add comments from Jira that don't exist in Todoist
-    for jira_comment in jira_comments:
-        if jira_comment not in todoist_comments:
+    for normalized_jira, original_jira in normalized_jira_comments.items():
+        if normalized_jira not in normalized_todoist_comments:
             try:
-                await api.add_comment(content=jira_comment, task_id=task_id)
+                await api.add_comment(content=original_jira, task_id=task_id)
                 logging.debug(f"Added new comment to task {task_id}")
                 changes_made += 1
             except Exception as error:
@@ -324,8 +368,8 @@ async def sync_todoist_comments(api, task_id, jira_comments):
                 )
 
     # Delete comments in Todoist that are no longer in Jira
-    for todoist_comment, comment_id in todoist_comments.items():
-        if todoist_comment not in jira_comments:
+    for normalized_todoist, (original_todoist, comment_id) in normalized_todoist_comments.items():
+        if normalized_todoist not in normalized_jira_comments:
             try:
                 await api.delete_comment(comment_id=comment_id)
                 logging.debug(f"Deleted comment from task {task_id}")
@@ -338,6 +382,8 @@ async def sync_todoist_comments(api, task_id, jira_comments):
     # Only log if there were actual changes
     if changes_made > 0:
         logging.info(f"Synced {changes_made} comment changes for task {task_id}")
+    elif DEBUG_MODE:
+        logging.debug(f"No comment changes needed for task {task_id}")
 
 
 async def sync_to_todoist(jira_tickets):
@@ -348,9 +394,12 @@ async def sync_to_todoist(jira_tickets):
     adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, pool_block=True)
     todoist_session.mount("https://api.todoist.com/", adapter)
     todoist_session.mount("http://api.todoist.com/", adapter)
-    api = TodoistAPIAsync(TODOIST_API_TOKEN, session=todoist_session)
-    project_name = "Jira Tickets"
+    
     try:
+        api = TodoistAPIAsync(TODOIST_API_TOKEN, session=todoist_session)
+        project_name = "Jira Tickets"
+        
+        # Get or create project
         projects_result = await api.get_projects()
         # Handle both async generator and regular list cases
         if hasattr(projects_result, '__aiter__'):
@@ -368,157 +417,180 @@ async def sync_to_todoist(jira_tickets):
             logging.info(f"Created project: {project_name}")
         else:
             logging.info(f"Using existing project: {project_name}")
-    except Exception as e:
-        logging.error(f"Failed to create or retrieve project '{project_name}': {e}")
-        return
 
-    try:
-        tasks_result = await api.get_tasks(project_id=jira_project.id)
-        # Handle both async generator and regular list cases
-        if hasattr(tasks_result, '__aiter__'):
-            # It's an async generator, convert to list
-            tasks_nested = [task async for task in tasks_result]
-            # The API returns a list inside the async generator
-            existing_tasks = tasks_nested[0] if tasks_nested and isinstance(tasks_nested[0], list) else tasks_nested
-        else:
-            # It's already a list
-            existing_tasks = tasks_result
-            
-        # Normalize task keys by stripping whitespace and ensuring consistent formatting
-        existing_task_map = {}
-        for task in existing_tasks:
-            if ":" in task.content:
-                jira_key = task.content.split(":")[0].strip()
-                existing_task_map[jira_key] = task
-    except Exception as e:
-        logging.error(f"Failed to retrieve existing tasks: {e}")
-        return
-
-    # Prepare batch updates, additions, and deletions
-    tasks_to_update = []
-    tasks_to_delete = []
-
-    jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
-
-    # Identify tasks to delete (tasks that no longer exist in Jira)
-    for task_key, task in existing_task_map.items():
-        if task_key not in jira_ticket_keys:
-            tasks_to_delete.append(task.id)
-            logging.debug(f"Marked task for deletion: {task_key} (Task ID: {task.id})")
-
-    for ticket in jira_tickets:
-        if ticket["status"] in {"Blocked"}:  # Skip blocked tickets
-            continue
-
-        task_content = f"{ticket['key']}: {ticket['summary']}".strip()
-        task_due_date = ticket["due_date"]
-        # Convert due_date to proper format if it exists
-        if task_due_date:
-            # Ensure due_date is a date object for Todoist API
-            if isinstance(task_due_date, str):
-                # Try to parse and convert to date object
-                try:
-                    # Try parsing as YYYY-MM-DD first
-                    parsed_date = datetime.strptime(task_due_date, '%Y-%m-%d')
-                    task_due_date = parsed_date.date()  # Convert to date object
-                except ValueError:
-                    try:
-                        # Try parsing as ISO format (YYYY-MM-DDTHH:MM:SS)
-                        parsed_date = datetime.fromisoformat(task_due_date.replace('Z', '+00:00'))
-                        task_due_date = parsed_date.date()  # Convert to date object
-                    except ValueError:
-                        # If all parsing fails, set to None
-                        logging.debug(f"Could not parse due date '{task_due_date}' for ticket {ticket['key']}, setting to None")
-                        task_due_date = None
+            # Get existing tasks
+            tasks_result = await api.get_tasks(project_id=jira_project.id)
+            # Handle both async generator and regular list cases
+            if hasattr(tasks_result, '__aiter__'):
+                # It's an async generator, convert to list
+                tasks_nested = [task async for task in tasks_result]
+                # The API returns a list inside the async generator
+                existing_tasks = tasks_nested[0] if tasks_nested and isinstance(tasks_nested[0], list) else tasks_nested
             else:
-                # If not a string, set to None
-                logging.debug(f"Due date for ticket {ticket['key']} is not a string: {type(task_due_date)} = {task_due_date}, setting to None")
-                task_due_date = None
-        
-        # Debug logging to see what we're actually passing
-        if DEBUG_MODE:
-            logging.debug(f"Ticket {ticket['key']}: task_due_date = {task_due_date} (type: {type(task_due_date)})")
-        
-        task_priority = 4  # Default priority
-        jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
-        comments = await get_jira_comments(ticket["key"])  # Fetch comments
-        task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Add link and description
+                # It's already a list
+                existing_tasks = tasks_result
+                
+            # Normalize task keys by stripping whitespace and ensuring consistent formatting
+            existing_task_map = {}
+            for task in existing_tasks:
+                if ":" in task.content:
+                    jira_key = task.content.split(":")[0].strip()
+                    existing_task_map[jira_key] = task
 
-        if ticket["priority"]:
-            priority_mapping = {
-                "Blocker": 1,
-                "Critical": 1,
-                "Major": 2,
-                "Minor": 3,
-                "Trivial": 4,
-            }
-            jira_priority = priority_mapping.get(ticket["priority"], 4)
-            # Invert the priority for Todoist
-            task_priority = 5 - jira_priority
-            logging.debug(
-                f"Ticket {ticket['key']} has Jira priority '{ticket['priority']}' mapped to Todoist priority {task_priority}"
-            )
+            # Prepare batch updates, additions, and deletions
+            tasks_to_update = []
+            tasks_to_delete = []
 
-        if ticket["key"] in existing_task_map:
-            # Update existing task
-            existing_task = existing_task_map[ticket["key"]]
-            update_payload = {
-                "task_id": existing_task.id,
-                "content": task_content,
-                "priority": task_priority,
-                "description": task_description,
-            }
-            # Only add due_date if it's valid
-            if task_due_date:
-                update_payload["due_date"] = task_due_date
-            if DEBUG_MODE:
-                logging.debug(f"Updating task with payload: {update_payload}")
-            tasks_to_update.append(update_payload)
-            # Sync comments with the existing task
-            await sync_todoist_comments(api, existing_task.id, comments)
-        else:
-            # Add new task
-            new_task = {
-                "content": task_content,
-                "project_id": jira_project.id,
-                "priority": task_priority,
-                "description": task_description,
-            }
-            # Only add due_date if it's valid
-            if task_due_date:
-                new_task["due_date"] = task_due_date
-            if DEBUG_MODE:
-                logging.debug(f"Creating new task with payload: {new_task}")
+            jira_ticket_keys = {ticket["key"] for ticket in jira_tickets}
+
+            # Identify tasks to delete (tasks that no longer exist in Jira)
+            for task_key, task in existing_task_map.items():
+                if task_key not in jira_ticket_keys:
+                    tasks_to_delete.append(task.id)
+                    logging.debug(f"Marked task for deletion: {task_key} (Task ID: {task.id})")
+
+            for ticket in jira_tickets:
+                if ticket["status"] in {"Blocked"}:  # Skip blocked tickets
+                    continue
+
+                task_content = f"{ticket['key']}: {ticket['summary']}".strip()
+                task_due_date = ticket["due_date"]
+                # Convert due_date to proper format if it exists
+                if task_due_date:
+                    # Ensure due_date is a date object for Todoist API
+                    if isinstance(task_due_date, str):
+                        # Try to parse and convert to date object
+                        try:
+                            # Try parsing as YYYY-MM-DD first
+                            parsed_date = datetime.strptime(task_due_date, '%Y-%m-%d')
+                            task_due_date = parsed_date.date()  # Convert to date object
+                        except ValueError:
+                            try:
+                                # Try parsing as ISO format (YYYY-MM-DDTHH:MM:SS)
+                                parsed_date = datetime.fromisoformat(task_due_date.replace('Z', '+00:00'))
+                                task_due_date = parsed_date.date()  # Convert to date object
+                            except ValueError:
+                                # If all parsing fails, set to None
+                                logging.debug(f"Could not parse due date '{task_due_date}' for ticket {ticket['key']}, setting to None")
+                                task_due_date = None
+                    else:
+                        # If not a string, set to None
+                        logging.debug(f"Due date for ticket {ticket['key']} is not a string: {type(task_due_date)} = {task_due_date}, setting to None")
+                        task_due_date = None
+                
+                # Debug logging to see what we're actually passing
+                if DEBUG_MODE:
+                    logging.debug(f"Ticket {ticket['key']}: task_due_date = {task_due_date} (type: {type(task_due_date)})")
+                
+                task_priority = 4  # Default priority
+                jira_link = f"{JIRA_SERVER_URL}/browse/{ticket['key']}"
+                comments = await get_jira_comments(ticket["key"])  # Fetch comments
+                task_description = f"{jira_link}\n\n{ticket.get('description', '') or ''}"  # Add link and description
+
+                if ticket["priority"]:
+                    priority_mapping = {
+                        "Blocker": 1,
+                        "Critical": 1,
+                        "Major": 2,
+                        "Minor": 3,
+                        "Trivial": 4,
+                    }
+                    jira_priority = priority_mapping.get(ticket["priority"], 4)
+                    # Invert the priority for Todoist
+                    task_priority = 5 - jira_priority
+                    logging.debug(
+                        f"Ticket {ticket['key']} has Jira priority '{ticket['priority']}' mapped to Todoist priority {task_priority}"
+                    )
+
+                if ticket["key"] in existing_task_map:
+                    # Check if existing task needs updating
+                    existing_task = existing_task_map[ticket["key"]]
+                    needs_update = False
+                    update_payload = {"task_id": existing_task.id}
+                    
+                    # Check if content changed
+                    if existing_task.content != task_content:
+                        update_payload["content"] = task_content
+                        needs_update = True
+                    
+                    # Check if priority changed
+                    if existing_task.priority != task_priority:
+                        update_payload["priority"] = task_priority
+                        needs_update = True
+                    
+                    # Check if description changed
+                    if getattr(existing_task, 'description', '') != task_description:
+                        update_payload["description"] = task_description
+                        needs_update = True
+                    
+                    # Check if due date changed
+                    existing_due = getattr(existing_task, 'due', None)
+                    existing_due_date = existing_due.date if existing_due and hasattr(existing_due, 'date') else None
+                    if existing_due_date != task_due_date:
+                        if task_due_date:
+                            update_payload["due_date"] = task_due_date
+                        needs_update = True
+                    
+                    # Only update if changes detected
+                    if needs_update:
+                        if DEBUG_MODE:
+                            logging.debug(f"Updating task {ticket['key']} with payload: {update_payload}")
+                        tasks_to_update.append(update_payload)
+                    else:
+                        if DEBUG_MODE:
+                            logging.debug(f"No changes detected for task {ticket['key']}, skipping update")
+                    
+                    # Sync comments with the existing task
+                    await sync_todoist_comments(api, existing_task.id, comments)
+                else:
+                    # Add new task
+                    new_task = {
+                        "content": task_content,
+                        "project_id": jira_project.id,
+                        "priority": task_priority,
+                        "description": task_description,
+                    }
+                    # Only add due_date if it's valid
+                    if task_due_date:
+                        new_task["due_date"] = task_due_date
+                    if DEBUG_MODE:
+                        logging.debug(f"Creating new task with payload: {new_task}")
+                    try:
+                        created_task = await api.add_task(**new_task)
+                        logging.info(f"Added new task: {created_task.id}")
+                        # Sync comments with the new task
+                        await sync_todoist_comments(api, created_task.id, comments)
+                    except Exception as e:
+                        logging.error(f"Failed to add new task: {e}")
+
+            # Perform batch updates asynchronously
+            update_tasks = [api.update_task(**task) for task in tasks_to_update]
+            delete_tasks = [api.delete_task(task_id=task_id) for task_id in tasks_to_delete]
+
             try:
-                created_task = await api.add_task(**new_task)
-                logging.info(f"Added new task: {created_task.id}")
-                # Sync comments with the new task
-                await sync_todoist_comments(api, created_task.id, comments)
+                if update_tasks:
+                    await asyncio.gather(*update_tasks)
+                    logging.info(f"Updated {len(update_tasks)} tasks.")
+                else:
+                    logging.info("No tasks needed updating.")
             except Exception as e:
-                logging.error(f"Failed to add new task: {e}")
+                logging.error(f"Failed to update some tasks: {e}")
 
-    # Perform batch updates asynchronously
-    update_tasks = [api.update_task(**task) for task in tasks_to_update]
-    delete_tasks = [api.delete_task(task_id=task_id) for task_id in tasks_to_delete]
-
-    try:
-        await asyncio.gather(*update_tasks)
-        logging.info(f"Updated {len(update_tasks)} tasks.")
-    except Exception as e:
-        logging.error(f"Failed to update some tasks: {e}")
-
-    try:
-        await asyncio.gather(*delete_tasks)
-        logging.info(f"Deleted {len(delete_tasks)} tasks.")
-    except Exception as e:
-        logging.error(f"Failed to delete some tasks: {e}")
+            try:
+                if delete_tasks:
+                    await asyncio.gather(*delete_tasks)
+                    logging.info(f"Deleted {len(delete_tasks)} tasks.")
+                else:
+                    logging.debug("No tasks needed deletion.")
+            except Exception as e:
+                logging.error(f"Failed to delete some tasks: {e}")
     finally:
         # Clean up the synchronous session
         todoist_session.close()
 
 
-async def run_service():
-    """Run the sync process as a service, checking every 5 minutes."""
+async def run_service(sync_interval_minutes=5):
+    """Run the sync process as a service, checking at the specified interval."""
     # Create session within running loop to bind to correct event loop
     connector = TCPConnector(limit=20)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -545,24 +617,38 @@ async def run_service():
             signal.signal(signal.SIGTERM, lambda s, f: signal_handler())
         
         while not shutdown_requested:
+            sync_start_time = datetime.now()
             logging.info("Starting Jira to Todoist sync...")
             try:
                 jira_tickets = await get_open_jira_tickets()
                 logging.debug(f"Jira Tickets: {jira_tickets}")
                 await sync_to_todoist(jira_tickets)
+                sync_duration = (datetime.now() - sync_start_time).total_seconds()
+                logging.info(f"Sync completed successfully in {sync_duration:.1f} seconds")
             except Exception as e:
-                logging.error(f"Error during sync: {e}")
+                sync_duration = (datetime.now() - sync_start_time).total_seconds()
+                logging.error(f"Error during sync (after {sync_duration:.1f}s): {e}")
             
             if shutdown_requested:
                 break
                 
-            logging.info("Sync complete. Waiting for 5 minutes...")
+            next_sync_time = datetime.now().replace(microsecond=0) + timedelta(minutes=sync_interval_minutes)
+            logging.info(f"Next sync scheduled for {next_sync_time.strftime('%H:%M:%S')}")
             
             # Sleep in chunks to allow for more responsive shutdown
-            for _ in range(30):  # 30 * 10 seconds = 5 minutes
+            total_sleep_seconds = sync_interval_minutes * 60
+            sleep_chunk_seconds = min(10, total_sleep_seconds)  # Sleep in 10-second chunks or less
+            chunks = int(total_sleep_seconds / sleep_chunk_seconds)
+            
+            for _ in range(chunks):
                 if shutdown_requested:
                     break
-                await asyncio.sleep(10)
+                await asyncio.sleep(sleep_chunk_seconds)
+            
+            # Handle any remaining time if not evenly divisible
+            remaining_seconds = total_sleep_seconds % sleep_chunk_seconds
+            if remaining_seconds > 0 and not shutdown_requested:
+                await asyncio.sleep(remaining_seconds)
         
         logging.info("Sync service shutting down gracefully...")
         return
@@ -594,9 +680,23 @@ async def main():
     # Update JIRA_USERNAME to fetch dynamically if not provided in config
     JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
     
+    # Get sync interval from config
+    sync_interval_minutes = config.get("sync_interval_minutes", 5)
+    
+    # Display startup banner
+    print("\n" + "="*60)
+    print("🚀 JIRA-TODOIST SYNC SERVICE STARTING")
+    print("="*60)
+    print(f"📍 Jira Server: {JIRA_SERVER_URL}")
+    print(f"👤 Jira User: {JIRA_USERNAME}")
+    print(f"🔧 Debug Mode: {'ON' if DEBUG_MODE else 'OFF'}")
+    print(f"⏰ Sync Interval: {sync_interval_minutes} minute{'s' if sync_interval_minutes != 1 else ''}")
+    print("💡 Press Ctrl+C to stop gracefully")
+    print("="*60 + "\n")
+    
     # Start the service with graceful shutdown handling
     try:
-        await run_service()
+        await run_service(sync_interval_minutes)
     except KeyboardInterrupt:
         logging.info("Received keyboard interrupt. Shutting down gracefully...")
     except Exception as e:
