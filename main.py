@@ -6,6 +6,8 @@ import getpass
 import urllib.parse
 import requests
 import aiohttp
+import signal
+import sys
 from datetime import datetime, date
 from aiohttp import TCPConnector
 from requests.adapters import HTTPAdapter
@@ -217,7 +219,7 @@ async def get_open_jira_tickets():
         "Content-Type": "application/json",
     }
     # Use resolution filter to only fetch unresolved tickets and exclude blocked and cancelled
-    jql_query = f'assignee = "{JIRA_USERNAME}" AND resolution = Unresolved AND status NOT IN ("Blocked","Canceled","Cancelled")'
+    jql_query = f'assignee = "{JIRA_USERNAME}" AND resolution = Unresolved AND status NOT IN ("Blocked","Canceled","Cancelled","Backlog","Done")'
     logging.debug(f"Using JQL Query: {jql_query}")
     query = {
         "jql": jql_query,
@@ -522,7 +524,27 @@ async def run_service():
     async with aiohttp.ClientSession(connector=connector) as session:
         global shared_session
         shared_session = session
-        while True:
+        
+        # Set up graceful shutdown flag
+        shutdown_requested = False
+        
+        def signal_handler():
+            nonlocal shutdown_requested
+            shutdown_requested = True
+            logging.info("Shutdown requested. Finishing current sync and exiting gracefully...")
+        
+        # Register signal handlers for graceful shutdown
+        if sys.platform != "win32":
+            # Unix-like systems
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, signal_handler)
+        else:
+            # Windows - use different approach
+            signal.signal(signal.SIGINT, lambda s, f: signal_handler())
+            signal.signal(signal.SIGTERM, lambda s, f: signal_handler())
+        
+        while not shutdown_requested:
             logging.info("Starting Jira to Todoist sync...")
             try:
                 jira_tickets = await get_open_jira_tickets()
@@ -530,8 +552,20 @@ async def run_service():
                 await sync_to_todoist(jira_tickets)
             except Exception as e:
                 logging.error(f"Error during sync: {e}")
+            
+            if shutdown_requested:
+                break
+                
             logging.info("Sync complete. Waiting for 5 minutes...")
-            await asyncio.sleep(300)
+            
+            # Sleep in chunks to allow for more responsive shutdown
+            for _ in range(30):  # 30 * 10 seconds = 5 minutes
+                if shutdown_requested:
+                    break
+                await asyncio.sleep(10)
+        
+        logging.info("Sync service shutting down gracefully...")
+        return
 
 
 async def main():
@@ -560,8 +594,25 @@ async def main():
     # Update JIRA_USERNAME to fetch dynamically if not provided in config
     JIRA_USERNAME = config.get("jira_username") or get_current_jira_user()
     
-    # Start the service
-    await run_service()
+    # Start the service with graceful shutdown handling
+    try:
+        await run_service()
+    except KeyboardInterrupt:
+        logging.info("Received keyboard interrupt. Shutting down gracefully...")
+    except Exception as e:
+        logging.error(f"Unexpected error in main: {e}")
+        raise
+    finally:
+        logging.info("Application shutdown complete.")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # This handles the case where KeyboardInterrupt bubbles up
+        print("\n🛑 Application interrupted by user. Goodbye!")
+        sys.exit(0)
+    except Exception as e:
+        logging.error(f"Fatal error: {e}")
+        sys.exit(1)
