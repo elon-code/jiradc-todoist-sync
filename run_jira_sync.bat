@@ -3,6 +3,11 @@ setlocal
 REM Ensure script runs in its own directory
 cd /d "%~dp0"
 
+REM Environment variables (optional - will be prompted if not set):
+REM set JIRA_API_TOKEN=your_jira_token_here
+REM set TODOIST_API_TOKEN=your_todoist_token_here
+REM set JIRA_SERVER_URL=https://your-jira-instance.atlassian.net
+
 REM Check Python availability
 python --version >nul 2>&1 || (
     echo Python not found in PATH. Please install Python or add it to PATH.

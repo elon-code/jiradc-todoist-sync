@@ -1,5 +1,4 @@
 {
-  "server_url": "https://jira.slac.stanford.edu",
   "debug": false,
   "sync_interval_minutes": 5,
   "jira_username": "",
@@ -21,7 +20,8 @@
   "api_credentials": {
     "jira": {
       "use_env_var": true,
-      "env_var_name": "JIRA_API_TOKEN"
+      "env_var_name": "JIRA_API_TOKEN",
+      "server_url_env_var": "JIRA_SERVER_URL"
     },
     "todoist": {
       "use_env_var": true,

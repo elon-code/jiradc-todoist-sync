@@ -14,8 +14,7 @@ import os
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.utils.config import load_config, get_api_credential, validate_config
-from src.api.jira import get_current_jira_user
+from src.utils.config import load_config, get_api_credential, get_server_url, validate_config
 from src.sync.service import run_service
 
 
@@ -32,16 +31,21 @@ async def main():
         print("❌ Configuration validation failed")
         sys.exit(1)
     
-    # Get API credentials (check env vars or prompt)
-    print("\n🔑 Checking API credentials...")
-    jira_token = get_api_credential("Jira", "JIRA_API_TOKEN")
-    todoist_token = get_api_credential("Todoist", "TODOIST_API_TOKEN")
+    # Get server URL first (needed for API credential testing)
+    print("\n🌐 Getting Jira server URL...")
+    server_url_env_var = config.get("api_credentials", {}).get("jira", {}).get("server_url_env_var", "JIRA_SERVER_URL")
+    server_url = get_server_url(server_url_env_var)
     
-    # Store runtime tokens in config for easy access
+    # Get API credentials and test them (check env vars or prompt)
+    print("\n🔑 Checking API credentials...")
+    jira_token, jira_username = get_api_credential("Jira", "JIRA_API_TOKEN", server_url)
+    todoist_token, _ = get_api_credential("Todoist", "TODOIST_API_TOKEN")
+    
+    # Store runtime values in config for easy access
     config["_runtime_jira_token"] = jira_token
     config["_runtime_todoist_token"] = todoist_token
-    
-    server_url = config["server_url"].rstrip('/')  # Remove trailing slash
+    config["_runtime_jira_username"] = jira_username
+    config["server_url"] = server_url  # Add server_url to config for compatibility
 
     # Configure logging
     debug_mode = config.get("debug", False)
@@ -56,16 +60,6 @@ async def main():
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         logging.getLogger("requests").setLevel(logging.WARNING)
 
-    # Get Jira username
-    print("\n🔍 Getting Jira user info...")
-    try:
-        jira_username = config.get("jira_username") or get_current_jira_user(config)
-        config["_runtime_jira_username"] = jira_username
-    except Exception as e:
-        print(f"❌ Failed to get Jira user info: {e}")
-        print("💡 Please check your Jira server URL and API token")
-        sys.exit(1)
-    
     # Get sync interval from config
     sync_interval_minutes = config.get("sync_interval_minutes", 5)
     
