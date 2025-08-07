@@ -6,7 +6,7 @@ This module contains the core logic for synchronizing Jira tickets with Todoist 
 
 import asyncio
 import logging
-from datetime import datetime, date
+from datetime import datetime
 from typing import Dict, Any, List
 
 from ..api.jira import get_jira_comments
