@@ -334,3 +334,29 @@ def validate_config(config: Dict[str, Any]) -> bool:
     # No required fields for now since server_url is now handled via environment variables
     # Future validation can be added here if needed
     return True
+
+
+def apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Override config values from environment variables when present.
+
+    Supported overrides:
+    - DEBUG -> config["debug"] (true/false/1/0/yes/no)
+    - SYNC_INTERVAL_MINUTES -> config["sync_interval_minutes"] (int)
+
+    Returns the mutated config for convenience.
+    """
+    try:
+        debug_env = os.getenv("DEBUG")
+        if debug_env is not None:
+            config["debug"] = str(debug_env).strip().lower() in ("1", "true", "yes", "on")
+
+        sim_env = os.getenv("SYNC_INTERVAL_MINUTES")
+        if sim_env:
+            try:
+                config["sync_interval_minutes"] = int(sim_env)
+            except ValueError:
+                print("⚠️  Invalid SYNC_INTERVAL_MINUTES; using value from config.json")
+    except Exception as e:
+        print(f"⚠️  Failed to apply env overrides: {e}")
+
+    return config

@@ -1,0 +1,29 @@
+# Exclude VCS and local files
+.git
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Environments
+.venv/
+venv/
+.env
+
+# OS files
+.DS_Store
+*.swp
+
+# IDE
+.vscode/
+.idea/
+
+# Tests, caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/

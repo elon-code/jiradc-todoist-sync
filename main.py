@@ -14,7 +14,7 @@ import os
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.utils.config import load_config, get_api_credential, get_server_url, validate_config
+from src.utils.config import load_config, get_api_credential, get_server_url, validate_config, apply_env_overrides
 from src.sync.service import run_service
 
 
@@ -26,7 +26,8 @@ async def main():
     # Load configuration
     config = load_config()
     
-    # Validate configuration
+    # Apply environment overrides then validate
+    config = apply_env_overrides(config)
     if not validate_config(config):
         print("❌ Configuration validation failed")
         sys.exit(1)
